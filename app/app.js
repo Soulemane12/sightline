@@ -357,6 +357,20 @@ function detectorWords(d) {
 }
 
 const REINGEST_STAGES = ['preparing', 'reingesting', 'indexing', 'verifying', 'ready'];
+const STAGE_LABEL = { preparing: 'Preparing', reingesting: 'Submitted', indexing: 'Pending index', verifying: 'Verifying', ready: 'Indexed' };
+
+/** Fast path: direct Cosmos preview. Never claims the VAST index changed. */
+function previewHTML(pv) {
+  if (!pv || pv.status === 'not_started') return '';
+  const r = (pv.results || [])[0];
+  const head = pv.status === 'done'
+    ? `<span class="rq-status ready">Preview ready</span> <span class="mono small muted">${esc(((pv.latency_ms || 0) / 1000).toFixed(1))} s · ${esc(pv.model || 'Cosmos')} · prompt ${esc(pv.prompt_chars || '?')}/800</span>`
+    : pv.status === 'running' ? `<span class="rq-status running">Preview running</span>`
+    : `<span class="rq-status failed">Preview ${esc(pv.status)}</span> <span class="small muted">${esc(pv.error || pv.note || '')}</span>`;
+  return `<div class="rq" style="margin-bottom:8px"><div class="rq-head"><span class="f">${esc(pv.label || 'Preview re-analysis (direct Cosmos, not indexed)')}</span><span>${head}</span></div>
+    ${r ? `<div class="rq-body small"><div class="muted" style="margin-bottom:4px">Original VAST caption</div><div style="margin-bottom:8px">${esc(r.original_caption)}</div>
+      <div class="muted" style="margin-bottom:4px">Cosmos with Sightline's prompt</div><div>${captionHTML(r.preview_caption)}</div></div>` : ''}</div>`;
+}
 
 function reingestHTML(src, job) {
   if (!src.profile) return `<div class="empty">Configure the camera first. Sightline needs a plan before it can write a prompt.</div>`;
@@ -369,8 +383,9 @@ function reingestHTML(src, job) {
         <div class="mono small" style="margin-bottom:6px">${esc(job.filename || shortSeg(job.original_video))}</div>
         <div class="small muted">${esc(job.chunk_count)} chunk · ${esc(job.clips ?? '?')} clips · ETA ${esc(job.eta || 'a few minutes')} · prompt ${esc(job.prompt && job.prompt.chars)}/800</div>
         ${job.reason ? `<div class="small" style="margin-top:8px">${esc(job.reason)}</div>` : ''}
-        <div class="btn-row" style="margin-top:10px"><button class="btn primary" data-action="approve-reingest" data-job="${esc(job.id)}">Approve and start re-ingest</button></div>
-      </div>`;
+        <div class="btn-row" style="margin-top:10px"><button class="btn primary" data-action="approve-reingest" data-job="${esc(job.id)}">Approve: preview + VAST re-ingest</button>
+          <button class="btn" data-action="preview-reingest" data-job="${esc(job.id)}" title="Direct Cosmos re-analysis; the VAST index is not touched">Preview only</button></div>
+      </div>${previewHTML(job.preview)}`;
   }
   const idx = REINGEST_STAGES.indexOf(job.status);
   const failed = job.status === 'failed';
@@ -378,20 +393,21 @@ function reingestHTML(src, job) {
   const pr = job.progress || {};
   const frac = pr.total_segments ? pr.indexed_segments / pr.total_segments : (job.status === 'ready' ? 1 : 0);
   const statusCls = failed ? 'failed' : job.status === 'ready' ? 'ready' : 'running';
-  return `<div class="rq">
-      <div class="rq-head"><span class="f">${esc(job.filename || shortSeg(job.original_video))}</span><span class="rq-status ${statusCls}">${esc(cap(job.status))}</span></div>
+  return `${previewHTML(job.preview)}<div class="rq">
+      <div class="rq-head"><span class="f">VAST index update · ${esc(job.filename || shortSeg(job.original_video))}</span><span class="rq-status ${statusCls}">${esc(STAGE_LABEL[job.status] || cap(job.status))}</span></div>
       <div class="rq-body">
         <div class="stepper">${REINGEST_STAGES.map((s, i) => {
           let c = '';
           if (failed) c = i < failedAt ? 'done' : i === failedAt ? 'failed' : '';
           else c = i < idx ? 'done' : i === idx ? (s === 'ready' ? 'done' : 'current') : '';
-          return `<div class="st ${c}">${esc(cap(s))}</div>`;
+          return `<div class="st ${c}">${esc(STAGE_LABEL[s] || cap(s))}</div>`;
         }).join('')}</div>
         <div class="progress"><i style="width:${(frac * 100).toFixed(0)}%"></i></div>
         <div class="small muted mono" title="Progress reported by VAST's re-ingest API, never estimated">
           ${esc(pr.completed_chunks ?? 0)}/${esc(pr.total_chunks ?? job.chunk_count ?? 1)} chunks · ${esc(pr.indexed_segments ?? 0)}/${esc(pr.total_segments ?? job.clips ?? '?')} clips${job.started_at ? ' · ' + esc(elapsed(job.started_at, job.finished_at)) : ''}</div>
         ${job.verify ? `<div class="callout" style="margin-top:8px">Verified: captions changed in ${esc(job.verify.changed)}/${esc(job.verify.total)} segments; ${esc(job.verify.with_terms ?? 0)} mention objective-specific details.</div>` : ''}
         ${failed ? `<div class="callout warn" style="margin-top:8px">Failed: ${esc(job.error || 'unknown error')}. Monitoring continues on the original captions.</div>` : ''}
+        ${job.status_note ? `<div class="small muted" style="margin-top:6px">${esc(job.status_note)}</div>` : ''}
       </div></div>`;
 }
 
@@ -400,7 +416,9 @@ function evolutionHTML(evo) {
   const steps = (evo && evo.steps) || [];
   if (!steps.length) return `<div class="empty">No re-analysis yet. After an approved re-ingest, this shows how the index's description of the footage changed.</div>`;
   return `<div class="evo">${steps.map(s => {
-    const [label, ver] = EVO_LABELS[s.stage] || [cap(s.stage), ''];
+    const [deflabel, ver0] = EVO_LABELS[s.stage] || [cap(s.stage), ''];
+    const label = s.label || deflabel;
+    const ver = s.kind === 'preview' ? 'preview' : s.kind === 'indexed' ? 'indexed' : ver0;
     return `<div class="card ${s.stage === 'event' ? 'event' : ''}" ${s.stage === 'event' && s.ref ? `data-nav="/incident/${enc(s.ref)}" style="cursor:pointer"` : ''}>
       <div class="k"><span>${esc(label)}</span><span class="v">${esc(ver)}</span></div>
       <div class="${s.stage === 'prompt' ? 'mono small' : ''}">${s.stage === 'reanalyzed' ? captionHTML(s.text) : esc(s.text)}</div></div>`;
@@ -418,7 +436,7 @@ VIEWS.source = {
       ${pane('Monitoring plan', '', { id: 'sv-plan', flush: true, right: 'generated by Sightline, not hand-written' })}
       <div class="cols2">
         ${pane('Cosmos prompt', '', { id: 'sv-prompt' })}
-        ${pane('Render queue: VAST re-ingest', '', { id: 'sv-reingest' })}
+        ${pane('Re-analysis', '', { id: 'sv-reingest', right: 'preview in seconds · VAST index async' })}
       </div>
       ${pane('Analysis versions', '', { id: 'sv-evo' })}
       ${pane('Incidents', '', { id: 'sv-incidents', flush: true })}
@@ -788,7 +806,8 @@ const ACTIONS = {
   'monitor-start': async el => { await POST(`api/sources/${enc(el.dataset.id)}/monitor`, {}); toast('Monitoring started (archive replay)', 'info'); },
   'monitor-stop': async el => { await DEL(`api/sources/${enc(el.dataset.id)}/monitor`); },
   'plan-reingest': async el => { await POST(`api/sources/${enc(el.dataset.id)}/reingest/plan`, {}); },
-  'approve-reingest': async el => { el.disabled = true; await POST(`api/reingest/${enc(el.dataset.job)}/approve`, {}); toast('Re-ingest started on VAST', 'info'); },
+  'approve-reingest': async el => { el.disabled = true; await POST(`api/reingest/${enc(el.dataset.job)}/approve`, {}); toast('Preview running; VAST re-ingest submitted', 'info'); },
+  'preview-reingest': async el => { el.disabled = true; await POST(`api/reingest/${enc(el.dataset.job)}/preview`, {}); toast('Preview re-analysis running (index untouched)', 'info'); },
   'toggle-caption': el => el.classList.toggle('open'),
   'play-seg': el => {
     const seg = el.dataset.seg;

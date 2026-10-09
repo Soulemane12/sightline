@@ -317,6 +317,13 @@
   const cap = s => String(s || '').replace(/^\w/, c => c.toUpperCase());
 
   function jobState(job) {
+    if (job.preview_at) {
+      const done = since(job.preview_at) > 2600;
+      job.preview = { status: done ? 'done' : 'running', label: 'Preview re-analysis (direct Cosmos, not indexed)', model: 'nvidia/cosmos3-nano-reasoner',
+        prompt_chars: (job.prompt && job.prompt.chars) || 0, latency_ms: 2600,
+        results: done ? [{ original_caption: 'A car drives down a street with parked cars and a cyclist.',
+          preview_caption: 'SCENE: residential street. A pedestrian steps off the curb as the car passes about 1 m away; the driver slows. FLAGS: pedestrian_vehicle_proximity' }] : [] };
+    }
     if (!job.approved_at) return job;
     const e = since(job.approved_at);
     const total = job.clips;
@@ -406,7 +413,8 @@
         const id = 'rj-' + (++jobSeq);
         jobs[id] = { id, source_id: src.id, original_video: `s3://team-x-vss-chunks/team-x/${src.id}_chunk_0019.mp4`, filename: `${src.id}_chunk_0019.mp4`, chunk_count: 1, clips: 12,
           prompt: src.profile.generated_prompt || { chars: 0 }, status: 'planned', eta: '~4–20 min on the real stack (mock: 20 s)',
-          reason: `Chunk 19 has the most candidate events whose captions lack: ${(src.profile.information_gaps || []).join('; ') || 'objective-specific detail'}.` };
+          reason: `Chunk 19 has the most candidate events whose captions lack: ${(src.profile.information_gaps || []).join('; ') || 'objective-specific detail'}.`,
+          preview: { status: 'not_started', label: 'Preview re-analysis (direct Cosmos, not indexed)' } };
         latestJob[src.id] = id;
         return jobs[id];
       }
@@ -435,7 +443,11 @@
     if (r[0] === 'reingest' && r[1]) {
       const job = jobs[decodeURIComponent(r[1])];
       if (!job) throw new Error('404 job not found');
-      if (r[2] === 'approve') { job.approved_at = Date.now(); job.started_at = iso(Date.now()); job.status = 'preparing'; }
+      if (r[2] === 'approve' || r[2] === 'preview') {
+        job.preview_at = Date.now();
+        if (r[2] === 'approve') { job.approved_at = Date.now(); job.started_at = iso(Date.now()); job.status = 'preparing'; }
+      }
+
       return clone(jobState(job));
     }
     if (r[0] === 'search') {
