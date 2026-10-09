@@ -137,7 +137,9 @@
     const evidence = cap.map((c, k) => ({
       role: roles[k], segment: segUri(spec.cam, n - 2 + k), t_start: (n - 2 + k) * SEG, t_end: (n - 1 + k) * SEG, caption: c,
       yolo: { classes: spec.yolo[k] || {} }, clip_url: null,
-    }));
+    })).concat((spec.angles || []).map(([view, c]) => ({
+      role: 'angle', camera_view: view, segment: segUri(spec.cam, n) + '#' + view, t_start: n * SEG, t_end: (n + 1) * SEG, caption: c, clip_url: null,
+    })));
     const comps = [
       { name: 'LLM evaluation', value: spec.conf[0], weight: 0.30, explanation: 'Evaluator verdict with an exact quote from the caption' },
       { name: 'Temporal consistency', value: spec.conf[1], weight: 0.25, explanation: 'Share of N±2 neighbors consistent with the event' },
@@ -182,6 +184,8 @@
       second: ['YES', 'A worker walks immediately behind a forklift that is reversing into the aisle.'],
       related: [[88, 'sdg_warehouse_cam-2', 'A forklift turns into aisle 3 while a worker walks along the racks.', 0.71], [140, 'sdg_warehouse_cam-2', 'Worker steps out from behind a rack as a forklift passes.', 0.66]],
       action: 'Notify the floor lead. Review the aisle 3 traffic plan; consider a pedestrian barrier at the rack-bay exits.',
+      angles: [['ceiling_01', 'Overhead view: the forklift reverses into the aisle as the worker passes behind it. FLAGS: person_vehicle_proximity'],
+               ['eye_01', 'Side view: the worker is about one meter from the rear of the reversing forklift.']],
     }),
     mkIncident({
       id: 'inc-wh-061', cam: 'sdg_warehouse_cam-2', domain: 'warehouse', location: 'warehouse3', seg: 61, objective: 'blocked_aisle',

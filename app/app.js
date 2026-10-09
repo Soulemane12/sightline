@@ -506,6 +506,9 @@ VIEWS.incident = {
           <div class="conf-big">${pct(conf.value)}</div><div class="conf-label">confidence · ${esc(inv.verdict || '')}</div></div>
       </div>
       <div class="multicam">${trip('Before', pick.Before)}${trip('Event', pick.Event)}${trip('After', pick.After)}</div>
+      ${evs.some(e => e.role === 'angle') ? pane('Other angles of the same moment', `<div class="related">${evs.filter(e => e.role === 'angle').map(a => `<div class="rel">${player(a, { cam: a.camera_view || camOf(a) })}
+          <div class="mono small">${esc(a.camera_view || camOf(a))} · ${esc(fmtTC(a.t_start))}</div><div>${captionHTML(String(a.caption || '').slice(0, 160))}</div></div>`).join('')}</div>`,
+        { right: 'same scenario, different camera' }) : ''}
       <div class="cols-3-2">
         <div class="stack">
           ${pane('Markers', `<ul class="timeline">${(inv.timeline || []).map(t => `<li class="${t.segment && t.segment === inv.peak_segment ? 'peak' : ''}" data-action="play-seg" data-seg="${esc(t.segment || '')}"><span class="tt">${esc(fmtTC(t.t))}</span><span>${esc(t.text)}</span></li>`).join('') || '<li><span></span><span>No markers</span></li>'}</ul>`)}
