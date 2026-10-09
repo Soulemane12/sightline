@@ -363,8 +363,14 @@ class VideoRepository:
             metadata_filters=filters,
         )
         hits: list[dict[str, Any]] = []
+        index = self._explore_index or {}
         for row in data.get("results") or []:
             seg = VideoSegment.from_vss_segment(row)
+            if not seg.camera_id and seg.original_video:
+                # Some search rows omit camera_id; recover it from the parent video (explore index).
+                if not index:
+                    index = await self._ensure_explore_index()
+                seg.camera_id = str((index.get(seg.original_video) or {}).get("camera_id") or "")
             sim = row.get("similarity_score")
             try:
                 sim_f = float(sim) if sim is not None else None
@@ -382,6 +388,7 @@ class VideoRepository:
                     camera_id=seg.camera_id or None,
                     similarity=sim_f,
                 ).model_dump()
+                | {"original_video": seg.original_video or None}
             )
         return hits
 

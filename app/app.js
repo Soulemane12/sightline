@@ -664,15 +664,15 @@ VIEWS.incident = {
 
 const AM = {};  // camera id → {btn, line} while an Add to Monitor flow is running (survives re-renders)
 
-function addMonitorButton(id, stay) {
-  return `<div class="btn-row" style="margin-top:8px">${addMonitorInline(id, stay)}</div>`;
+function addMonitorButton(id, stay, video) {
+  return `<div class="btn-row" style="margin-top:8px">${addMonitorInline(id, stay, video)}</div>`;
 }
-function addMonitorInline(id, stay) {
+function addMonitorInline(id, stay, video) {
   const src = sourceById(id);
   const busy = AM[id];
   const on = !busy && src && src.status === 'monitoring';
   const label = busy ? busy.btn : on ? 'Monitoring · open' : '＋ Add to Monitor';
-  return `<button class="btn ${on ? '' : 'primary'}" data-action="add-monitor" data-id="${esc(id)}"${stay ? ' data-stay="1"' : ''}${busy ? ' disabled' : ''}>${esc(label)}</button>
+  return `<button class="btn ${on ? '' : 'primary'}" data-action="add-monitor" data-id="${esc(id)}"${video ? ` data-video="${esc(video)}"` : ''}${stay ? ' data-stay="1"' : ''}${busy ? ' disabled' : ''}>${esc(label)}</button>
     <span class="small muted mono" data-am-status="${esc(id)}">${esc(busy ? busy.line : '')}</span>`;
 }
 
@@ -697,8 +697,9 @@ async function addToMonitor(el) {
     document.querySelectorAll(`[data-action="add-monitor"][data-id="${CSS.escape(id)}"]`).forEach(b => { b.textContent = btn; b.disabled = true; });
     document.querySelectorAll(`[data-am-status="${CSS.escape(id)}"]`).forEach(x => { x.textContent = line || ''; });
   };
-  const src = sourceById(id);
   if (AM[id]) return;
+  let src = sourceById(id);
+  try { src = await GET(`api/sources/${enc(id)}`); } catch (_) { /* fall back to the cached list */ }
   if (src && src.status === 'monitoring') { S.selected = id; if (!stay) nav('/source/' + enc(id)); return; }
   try {
     if (!src || !src.classification) {
@@ -713,7 +714,7 @@ async function addToMonitor(el) {
       });
     }
     say('Starting…', 'Starting autonomous monitoring');
-    await POST(`api/sources/${enc(id)}/monitor`, {});
+    await POST(`api/sources/${enc(id)}/monitor`, el.dataset.video ? { video: el.dataset.video } : {});
     delete AM[id];
     toast('Sightline configured this camera and started monitoring', 'info');
     S.selected = id;
@@ -753,7 +754,7 @@ VIEWS.search = {
       box.innerHTML = hits.length ? `<div class="results">${hits.map(h => `<div class="rel">${player(h)}
         <div class="mono small" style="margin-top:4px">${esc(h.camera_id || '')} · ${esc(fmtTC(h.t_start))}${h.similarity != null ? ' · ' + pct(h.similarity) : ''}</div>
         <div>${esc(String(h.caption || '').slice(0, 200))}</div>
-        ${h.camera_id ? addMonitorButton(h.camera_id) : ''}</div>`).join('')}</div>` : '<div class="empty">No matches.</div>';
+        ${h.camera_id ? addMonitorButton(h.camera_id, false, h.original_video) : ''}</div>`).join('')}</div>` : '<div class="empty">No matches.</div>';
     } catch (e) { box.innerHTML = `<div class="empty">Search failed: ${esc(e.message)}</div>`; }
   },
 };
@@ -1092,12 +1093,12 @@ function loadScript(src) {
 }
 
 async function boot() {
-  if (MOCK) await loadScript('mock.js');
+  if (MOCK) await loadScript('mock.js?v=' + Date.now());
   try { const u = await GET('api/newsource/enabled'); S.uploadEnabled = !!u.enabled; S.uploadMax = u.max_mb; } catch (_) { S.uploadEnabled = false; }
   await refreshStatus();
+  await refresh();
   window.addEventListener('hashchange', render);
   await render();
-  await refresh();
   setInterval(refresh, POLL_MS);
   setInterval(refreshStatus, STATUS_MS);
 }
