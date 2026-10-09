@@ -78,3 +78,12 @@ async def api_newsource_video(source_id: str):
     if not path:
         raise HTTPException(404, "video not found (pod restarted?)")
     return FileResponse(path, media_type=_MEDIA.get(path.suffix.lower(), "video/mp4"))
+
+
+@router.delete("/api/newsource/{source_id}")
+async def api_newsource_delete(source_id: str) -> dict[str, Any]:
+    """Remove an uploaded feed: its analysis, markers, incidents and the stored file."""
+    from routes_feeds import _remove_upload_file, clear_feed
+    removed = clear_feed(source_id)
+    _remove_upload_file(source_id)
+    return {"ok": True, "source_id": source_id, "removed": removed}

@@ -364,7 +364,7 @@ function renderSidebar() {
       <span class="count"></span></div>`;
   }).join('');
   setHTML($('#sidebar'), `
-    <div class="side-h"><span>Feeds</span><span class="mono muted">${feeds.length + (S.uploads || []).length}</span></div>
+    <div class="side-h"><span>Feeds <span class="mono muted">${feeds.length + (S.uploads || []).length}</span></span>${feeds.length + (S.uploads || []).length ? '<button class="linkbtn" data-action="clear-feeds">Clear all</button>' : ''}</div>
     ${items + ups || '<div class="empty" style="padding:12px">No feeds yet.</div>'}
     <div style="padding:12px 12px 6px" class="btn-row"><button class="btn primary" style="flex:1" data-nav="/search">＋ Add a feed</button>${S.uploadEnabled ? '<button class="btn" style="flex:1" data-nav="/new">Upload a clip</button>' : ''}</div>
     <div class="small muted" style="padding:0 12px">Search the VAST archive and press <b>Add to Monitor</b>${S.uploadEnabled ? ', or Import a clip' : ''}.</div>`);
@@ -412,7 +412,8 @@ VIEWS.overview = {
 
     setHTML($('#ov-title', main), `${esc(src.label || src.camera_id)} <span class="tag" style="margin-left:6px">${esc(feedState(src))}</span>${cl ? `<span class="tag">${esc(cap(cl.domain))}</span>` : ''}`);
     setHTML($('#ov-actions', main), `<button class="btn" data-nav="/source/${enc(src.id)}">Details</button>
-      ${live ? `<button class="btn" data-action="monitor-stop" data-id="${esc(src.id)}">Pause</button>` : addMonitorInline(src.id, true)}`);
+      ${live ? `<button class="btn" data-action="monitor-stop" data-id="${esc(src.id)}">Pause</button>` : addMonitorInline(src.id, true)}
+      <button class="btn danger" data-action="remove-feed" data-id="${esc(src.id)}" title="Stop monitoring and clear this feed's incidents and configuration">Remove</button>`);
 
     const latest = mine[0];
     const ev = latest && (latest.evidence || []).find(e => e.role === 'event');
@@ -583,6 +584,7 @@ VIEWS.source = {
       <div class="btn-row">
         ${monitoring ? `<button class="btn" data-nav="/">Watch</button><button class="btn" data-action="monitor-stop" data-id="${esc(d.id)}">Pause</button>`
                      : addMonitorInline(d.id, true)}
+        ${isFeed(d) ? `<button class="btn danger" data-action="remove-feed" data-id="${esc(d.id)}" title="Stop monitoring and clear this feed's incidents and configuration">Remove feed</button>` : ''}
       </div></div>`);
 
     setHTML($('#sv-summary', main), cl ? `
@@ -821,7 +823,8 @@ VIEWS.new = {
       <div class="player" style="margin-top:12px"><video id="nf-video" src="${esc(url)}" controls muted playsinline></video></div>
       <div id="nf-markers"></div>
       ${f.frames ? `<div class="small muted mono" style="margin-top:6px">${esc(f.file ? f.file.name : '')} · ${f.file ? (f.file.size / 1048576).toFixed(1) + ' MB · ' : ''}${fmtT(f.duration)} · ${f.frames.length} frames sampled</div>
-      <div class="btn-row" style="margin-top:10px"><button class="btn primary" data-action="nf-submit" ${f.sid ? 'disabled' : ''}>${f.sid ? 'Sightline is on it' : 'Let Sightline configure it'}</button></div>` : ''}`;
+      <div class="btn-row" style="margin-top:10px"><button class="btn primary" data-action="nf-submit" ${f.sid ? 'disabled' : ''}>${f.sid ? 'Sightline is on it' : 'Let Sightline configure it'}</button></div>` : ''}
+      ${f.sid ? `<div class="btn-row" style="margin-top:10px"><button class="btn danger" data-action="remove-upload" data-sid="${esc(f.sid)}">Remove this upload</button></div>` : ''}`;
   },
   async submit(main) {
     const f = S.fresh;
@@ -1032,10 +1035,42 @@ async function render() {
   renderSidebar();
 }
 
+/** Destructive buttons need a second click within 4 s (no browser dialogs). */
+function armed(el, prompt) {
+  if (el.dataset.armed === '1') return true;
+  const label = el.textContent;
+  el.dataset.armed = '1';
+  el.textContent = prompt;
+  setTimeout(() => { if (el.isConnected && el.dataset.armed === '1') { el.dataset.armed = ''; el.textContent = label; } }, 4000);
+  return false;
+}
+
 const ACTIONS = {
   'select-source': el => { S.selected = el.dataset.id; S.scrub = null; },
   'open-feed': el => { S.selected = el.dataset.id; S.scrub = null; const m = $('#main'); if (S.route.name === 'overview' && m) VIEWS.overview.update(m); else nav('/'); },
   'open-upload': el => { S.fresh = { sid: el.dataset.sid }; if (S.route.name === 'new') { VIEWS.new.mount($('#main')); VIEWS.new.update($('#main')); } else nav('/new'); },
+  'remove-feed': async el => {
+    if (!armed(el, 'Click again to remove')) return;
+    await DEL(`api/feeds/${enc(el.dataset.id)}`);
+    if (S.selected === el.dataset.id) S.selected = null;
+    S.scrub = null;
+    toast('Feed removed. Its footage stays searchable in the archive.', 'info');
+    if (S.route.name !== 'overview') nav('/');
+  },
+  'remove-upload': async el => {
+    if (!armed(el, 'Click again to remove')) return;
+    await DEL(`api/newsource/${enc(el.dataset.sid)}`);
+    S.fresh = null;
+    toast('Upload removed', 'info');
+    VIEWS.new.mount($('#main'));
+  },
+  'clear-feeds': async el => {
+    if (!armed(el, 'Click again to clear all')) return;
+    await DEL('api/feeds');
+    S.selected = null; S.scrub = null; S.fresh = null;
+    toast('All feeds cleared', 'info');
+    nav('/');
+  },
   'toggle-how': el => { S.showHow = !S.showHow; const h = $('#sv-how'); if (h) h.hidden = !S.showHow; el.textContent = S.showHow ? 'Hide details' : 'Show how Sightline configured this feed'; },
   'scrub-clear': () => { S.scrub = null; const b = $('#ov-player'); if (b) b._html = null; },
   'add-monitor': el => addToMonitor(el),

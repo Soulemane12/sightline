@@ -326,3 +326,6 @@ input[type=text]:focus, select:focus { outline: none; border-color: var(--accent
 .tl-mark { z-index: 2; }
 
 [hidden] { display: none !important; }
+
+.linkbtn { background: none; border: 0; color: var(--text-3); font: 500 11.5px var(--sans); cursor: pointer; padding: 0; }
+.linkbtn:hover { color: var(--crit); }

@@ -377,7 +377,7 @@ class NewSourceService:
 
     def view(self, sid: str) -> Optional[dict[str, Any]]:
         meta = self.store.get("source", sid)
-        if not meta or not str(sid).startswith("upload-"):
+        if not meta or not str(sid).startswith("upload-") or meta.get("status") == "unconfigured":
             return None
         events = self.store.list_kind("event", source_id=sid)
         incidents = self.store.list_incidents(source_id=sid)
@@ -412,7 +412,7 @@ class NewSourceService:
     def list(self) -> list[dict[str, Any]]:
         out = []
         for meta in self.store.list_kind("source"):
-            if meta and str(meta.get("id", "")).startswith("upload-"):
+            if meta and str(meta.get("id", "")).startswith("upload-") and meta.get("status") != "unconfigured":
                 out.append({"source_id": meta["id"], "label": meta.get("label"), "status": meta.get("status"),
                             "upload": meta.get("upload") or {}})
         return sorted(out, key=lambda m: (m["upload"].get("created_at") or ""), reverse=True)

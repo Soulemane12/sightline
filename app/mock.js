@@ -408,7 +408,7 @@
     if (r[0] === 'sources' && r[1]) {
       const src = SOURCES.find(s => s.id === decodeURIComponent(r[1]));
       if (!src) throw new Error('404 source not found');
-      if (r[2] === 'configure' && method === 'POST') { configureAt[src.id] = Date.now(); return { job_id: 'cfg-' + jobSeq++ }; }
+      if (r[2] === 'configure' && method === 'POST') { if (!src.classification && src._cl) { src.classification = src._cl; src.profile = src._pf; src.status = 'configured'; } configureAt[src.id] = Date.now(); return { job_id: 'cfg-' + jobSeq++ }; }
       if (r[2] === 'monitor') { src.status = method === 'DELETE' ? 'configured' : 'monitoring'; if (!src.replayStart) src.replayStart = 1; return { ok: true }; }
       if (r[2] === 'reingest' && r[3] === 'plan') {
         const id = 'rj-' + (++jobSeq);
@@ -470,6 +470,13 @@
       if (!j) return { id: r[1], status: 'done' };
       return newsourceJob(j);
     }
+    if (r[0] === 'feeds' && method === 'DELETE') {
+      const ids = r[1] ? [decodeURIComponent(r[1])] : SOURCES.filter(x => x.classification).map(x => x.id);
+      ids.forEach(id => { const x = SOURCES.find(y => y.id === id); if (x) { x._cl = x._cl || x.classification; x._pf = x._pf || x.profile; x.status = 'unconfigured'; x.classification = null; x.profile = null; x.replayStart = 0; } });
+      if (!r[1]) Object.keys(uploads).forEach(k => delete uploads[k]);
+      return { ok: true, removed: ids };
+    }
+    if (r[0] === 'newsource' && method === 'DELETE' && r[1]) { delete uploads[decodeURIComponent(r[1])]; return { ok: true }; }
     if (r[0] === 'newsource') {
       if (r[1] === 'enabled') return { enabled: true, max_mb: 100 };
       if (method === 'POST') {
