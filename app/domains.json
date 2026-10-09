@@ -1,0 +1,1538 @@
+{
+  "version": 1,
+  "use_case": "dangerous_person_vehicle_interactions",
+  "primary_source_hint": "sdg_warehouse_cam-2",
+  "secondary_source_hint": "nyc_streets_cam-1",
+  "yolo_classes_observed": [
+    "person",
+    "car",
+    "traffic light",
+    "truck",
+    "bicycle",
+    "bus",
+    "handbag",
+    "backpack",
+    "motorcycle",
+    "fire hydrant",
+    "clock",
+    "bench",
+    "potted plant",
+    "suitcase",
+    "skateboard",
+    "cell phone",
+    "umbrella",
+    "stop sign",
+    "parking meter",
+    "chair",
+    "train",
+    "airplane",
+    "kite",
+    "horse",
+    "tv"
+  ],
+  "rule_vocabulary": [
+    {
+      "primitive": "entities_present",
+      "params": {
+        "entities": ["str"],
+        "min_count": {"entity": "n"}
+      },
+      "needs": "yolo_or_caption",
+      "passes_when": "every listed entity is present (YOLO class map or caption synonym)"
+    },
+    {
+      "primitive": "cooccur",
+      "params": { "a": "str", "b": "str" },
+      "needs": "yolo_or_caption",
+      "passes_when": "a and b both present in the segment"
+    },
+    {
+      "primitive": "bbox_proximity",
+      "params": {
+        "a": "str",
+        "b": "str",
+        "max_gap_norm": "0.03-0.10",
+        "min_frames": ">=2"
+      },
+      "needs": "yolo_sidecar",
+      "passes_when": "closest box edge gap / frame diagonal <= max for >= min frames; boxes are pixel xyxy — normalize by frame diagonal at runtime"
+    },
+    {
+      "primitive": "count_threshold",
+      "params": {
+        "entity": "str",
+        "op": ">=|<=",
+        "value": "number"
+      },
+      "needs": "yolo_or_caption_numbers",
+      "passes_when": "count condition holds"
+    },
+    {
+      "primitive": "persistence",
+      "params": {
+        "entity": "str",
+        "min_segments": "int",
+        "stationary": "bool"
+      },
+      "needs": "yolo_sidecar_across_segments",
+      "passes_when": "entity stays in a similar box position for >= N consecutive segments"
+    },
+    {
+      "primitive": "disappearance",
+      "params": {
+        "entity": "str",
+        "present_segments": "int",
+        "absent_segments": "int"
+      },
+      "needs": "yolo_across_segments",
+      "passes_when": "present for N segments, then absent for M"
+    },
+    {
+      "primitive": "caption_terms",
+      "params": {
+        "any": ["str"],
+        "all": ["str"],
+        "none": ["str"]
+      },
+      "needs": "caption",
+      "passes_when": "case-insensitive term/regex match"
+    },
+    {
+      "primitive": "caption_flag",
+      "params": { "flag": "str" },
+      "needs": "specialized_caption",
+      "passes_when": "FLAGS: line contains the flag (only after Sightline prompt re-ingest)"
+    },
+    {
+      "primitive": "semantic_probe",
+      "params": {
+        "query": "str",
+        "min_similarity": "float"
+      },
+      "needs": "vss_search",
+      "passes_when": "segment appears in probe results above threshold"
+    },
+    {
+      "primitive": "time_window",
+      "params": {
+        "start": "HH:MM",
+        "end": "HH:MM"
+      },
+      "needs": "wall_clock_metadata",
+      "passes_when": "DISABLED: no capture wall-clock in index (upload_timestamp only). Engine should skip this primitive.",
+      "available": false
+    }
+  ],
+  "entity_map": {
+    "person": {
+      "yolo": ["person"],
+      "caption_synonyms": [
+        "person",
+        "worker",
+        "pedestrian",
+        "people",
+        "man",
+        "woman",
+        "shopper",
+        "player"
+      ],
+      "note": "reliable"
+    },
+    "vehicle": {
+      "yolo": ["car", "truck", "bus", "motorcycle"],
+      "caption_synonyms": ["car", "vehicle", "truck", "van", "bus"],
+      "note": "reliable on roads"
+    },
+    "forklift": {
+      "yolo": [],
+      "caption_synonyms": [
+        "forklift",
+        "lift truck",
+        "reach truck",
+        "pallet jack",
+        "ATLAS"
+      ],
+      "note": "caption-driven; YOLO has no forklift class (sometimes mis-detected as truck/car)"
+    },
+    "pallet": {
+      "yolo": [],
+      "caption_synonyms": ["pallet", "skid", "boxes", "crate", "load"],
+      "note": "caption-driven"
+    },
+    "cyclist": {
+      "yolo": ["bicycle"],
+      "caption_synonyms": ["cyclist", "bike", "bicycle"],
+      "note": "prefer bicycle + person together"
+    },
+    "bag": {
+      "yolo": ["backpack", "handbag", "suitcase"],
+      "caption_synonyms": ["bag", "backpack", "suitcase", "package", "box"],
+      "note": "unattended object"
+    },
+    "cart": {
+      "yolo": [],
+      "caption_synonyms": ["cart", "trolley", "shopping cart"],
+      "note": "caption-driven"
+    },
+    "ball": {
+      "yolo": ["sports ball"],
+      "caption_synonyms": ["ball", "basketball"],
+      "note": "sports ball not observed in dashboard objects[]; treat as caption-driven unless present"
+    },
+    "phone": {
+      "yolo": ["cell phone"],
+      "caption_synonyms": ["phone"],
+      "note": "cell phone present in objects[]"
+    }
+  },
+  "severity_rubric": {
+    "critical": "imminent or actual injury, collision or fall; immediate response",
+    "high": "unsafe interaction that could cause harm in seconds",
+    "medium": "operational hazard needing attention this shift",
+    "low": "unusual pattern worth review; no immediate risk",
+    "modifiers": {
+      "plus_one": [
+        "duration_ge_3_segments",
+        "repeats_ge_3_in_source",
+        "second_look_confirms"
+      ],
+      "minus_one": ["neighbors_contradict", "only_one_weak_signal"],
+      "clamp": ["low", "critical"]
+    }
+  },
+  "domains": {
+    "warehouse": {
+      "id": "warehouse",
+      "label": "Warehouse / industrial safety",
+      "cues": {
+        "caption_keywords": [
+          "warehouse",
+          "aisle",
+          "forklift",
+          "pallet",
+          "rack",
+          "loading dock",
+          "hi-vis",
+          "vest",
+          "ATLAS"
+        ],
+        "yolo_classes": ["person", "truck", "car"],
+        "metadata_hints": {
+          "capture_type": ["warehouse"],
+          "camera_id_contains": ["warehouse", "sdg_warehouse"]
+        }
+      },
+      "entities": ["person", "forklift", "pallet", "cart", "vehicle"],
+      "corpus_cameras": ["sdg_warehouse_cam-2"],
+      "wording_style": "safety_ops",
+      "actions": [
+        "Notify the floor lead",
+        "Review aisle traffic plan",
+        "Add a pedestrian barrier at <location>"
+      ],
+      "objectives": [
+        {
+          "id": "worker_vehicle_proximity",
+          "name": "Worker / forklift proximity",
+          "description": "A person within close range of a moving forklift.",
+          "severity": "high",
+          "rationale": "Workers and forklifts share aisles; primary person–vehicle risk in warehouse.",
+          "detector": {
+            "all_of": [
+              { "primitive": "cooccur", "params": { "a": "person", "b": "forklift" } }
+            ],
+            "any_of": [
+              {
+                "primitive": "bbox_proximity",
+                "params": {
+                  "a": "person",
+                  "b": "truck",
+                  "max_gap_norm": 0.06,
+                  "min_frames": 2
+                }
+              },
+              {
+                "primitive": "bbox_proximity",
+                "params": {
+                  "a": "person",
+                  "b": "car",
+                  "max_gap_norm": 0.06,
+                  "min_frames": 2
+                }
+              },
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": ["near", "close", "beside", "approaching", "close to"]
+                }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "person_vehicle_proximity" }
+              }
+            ],
+            "merge_gap_segments": 1
+          },
+          "semantic_probes": ["forklift moving close to a worker in an aisle"],
+          "investigation_questions": [
+            "Was the forklift moving?",
+            "Did their paths intersect?",
+            "For how many segments?",
+            "Did anyone react?"
+          ],
+          "wording": {
+            "title": "Worker / forklift proximity",
+            "review_action": "Notify the floor lead; review aisle traffic plan"
+          }
+        },
+        {
+          "id": "person_in_vehicle_path",
+          "name": "Person in forklift path",
+          "description": "A worker steps into the travel path of a moving forklift.",
+          "severity": "high",
+          "rationale": "Crossing in front of or behind a moving forklift is a classic near miss.",
+          "detector": {
+            "all_of": [
+              { "primitive": "cooccur", "params": { "a": "person", "b": "forklift" } }
+            ],
+            "any_of": [
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": ["path", "crossing", "in front of", "behind"]
+                }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "person_in_vehicle_path" }
+              }
+            ],
+            "merge_gap_segments": 1
+          },
+          "semantic_probes": ["worker walks into the forklift travel path"],
+          "investigation_questions": [
+            "Did the person enter the lane before or after the forklift arrived?"
+          ],
+          "wording": {
+            "title": "Person in forklift path",
+            "review_action": "Notify the floor lead"
+          }
+        },
+        {
+          "id": "person_fall",
+          "name": "Possible fall",
+          "description": "A person on the floor or falling.",
+          "severity": "critical",
+          "rationale": "Low base rate but critical severity.",
+          "detector": {
+            "all_of": [],
+            "any_of": [
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": ["fall", "fell", "slipped", "on the ground", "lying"]
+                }
+              },
+              { "primitive": "caption_flag", "params": { "flag": "fall" } }
+            ],
+            "merge_gap_segments": 1
+          },
+          "semantic_probes": ["person falls to the floor in the warehouse"],
+          "investigation_questions": [
+            "Is the person still down in N+1/N+2?",
+            "Did anyone respond?"
+          ],
+          "wording": {
+            "title": "Possible fall, requires immediate review",
+            "review_action": "Immediate review; notify floor lead"
+          }
+        },
+        {
+          "id": "blocked_aisle",
+          "name": "Blocked aisle",
+          "description": "A pallet or object obstructs a walkway or aisle.",
+          "severity": "medium",
+          "rationale": "Blocked aisles push pedestrians into vehicle lanes.",
+          "detector": {
+            "all_of": [],
+            "any_of": [
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": ["blocked", "obstruct", "pallet in aisle", "debris"]
+                }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "blocked_aisle" }
+              }
+            ],
+            "merge_gap_segments": 2
+          },
+          "semantic_probes": ["pallet left blocking an aisle or walkway"],
+          "investigation_questions": [
+            "How long has it stayed?",
+            "Is traffic rerouting around it?"
+          ],
+          "wording": {
+            "title": "Blocked aisle",
+            "review_action": "Clear the walkway; review staging spots"
+          }
+        },
+        {
+          "id": "restricted_zone_entry",
+          "name": "Restricted zone entry",
+          "description": "A person inside a marked or restricted zone.",
+          "severity": "high",
+          "rationale": "Restricted zones often coincide with active equipment.",
+          "detector": {
+            "all_of": [],
+            "any_of": [
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": ["restricted", "marked zone", "caution area"]
+                }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "restricted_zone" }
+              }
+            ],
+            "merge_gap_segments": 1
+          },
+          "semantic_probes": ["person inside a marked restricted zone"],
+          "investigation_questions": ["Was equipment active at the time?"],
+          "wording": {
+            "title": "Restricted zone entry",
+            "review_action": "Notify floor lead; check zone markings"
+          }
+        },
+        {
+          "id": "congestion",
+          "name": "Aisle congestion",
+          "description": "Many workers and vehicles crowded in one area.",
+          "severity": "medium",
+          "rationale": "Congestion raises proximity risk.",
+          "detector": {
+            "all_of": [],
+            "any_of": [
+              {
+                "primitive": "count_threshold",
+                "params": { "entity": "person", "op": ">=", "value": 5 }
+              },
+              {
+                "primitive": "caption_terms",
+                "params": { "any": ["crowded", "congested"] }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "congestion" }
+              }
+            ],
+            "merge_gap_segments": 2
+          },
+          "semantic_probes": [
+            "many workers and vehicles crowded in one aisle"
+          ],
+          "investigation_questions": ["Duration?", "Vehicles waiting?"],
+          "wording": {
+            "title": "Aisle congestion",
+            "review_action": "Review traffic plan for the congested zone"
+          }
+        }
+      ]
+    },
+    "traffic": {
+      "id": "traffic",
+      "label": "Traffic / road safety",
+      "cues": {
+        "caption_keywords": [
+          "road",
+          "lane",
+          "intersection",
+          "crosswalk",
+          "highway",
+          "pedestrian",
+          "dashcam",
+          "traffic"
+        ],
+        "yolo_classes": ["car", "truck", "bus", "motorcycle", "person", "bicycle"],
+        "metadata_hints": {
+          "capture_type": ["traffic", "streets"],
+          "camera_id_contains": ["i24", "pie_cam", "streets", "nyc_"]
+        }
+      },
+      "entities": ["vehicle", "person", "cyclist"],
+      "corpus_cameras": [
+        "i24_cam-1",
+        "pie_cam-3",
+        "nyc_streets_cam-1",
+        "nyc_streets_cam-2",
+        "neighborhood_cam-1",
+        "sf_streets_cam-1",
+        "sf_streets_cam-2",
+        "sf_streets_cam-3",
+        "sf_streets_cam-4",
+        "sf_streets_cam-5"
+      ],
+      "wording_style": "neutral_observational",
+      "actions": [
+        "Flag intersection for a signal-timing review",
+        "Dispatch a road crew",
+        "Add to the conflict hotspot report"
+      ],
+      "objectives": [
+        {
+          "id": "pedestrian_vehicle_proximity",
+          "name": "Pedestrian / vehicle conflict",
+          "description": "A pedestrian close to a moving vehicle.",
+          "severity": "high",
+          "rationale": "Primary person–vehicle risk on roads and streets.",
+          "detector": {
+            "all_of": [
+              { "primitive": "cooccur", "params": { "a": "person", "b": "vehicle" } }
+            ],
+            "any_of": [
+              {
+                "primitive": "bbox_proximity",
+                "params": {
+                  "a": "person",
+                  "b": "car",
+                  "max_gap_norm": 0.05,
+                  "min_frames": 2
+                }
+              },
+              {
+                "primitive": "bbox_proximity",
+                "params": {
+                  "a": "person",
+                  "b": "truck",
+                  "max_gap_norm": 0.05,
+                  "min_frames": 2
+                }
+              },
+              {
+                "primitive": "bbox_proximity",
+                "params": {
+                  "a": "person",
+                  "b": "bus",
+                  "max_gap_norm": 0.05,
+                  "min_frames": 2
+                }
+              },
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": ["crossing", "near the car", "in front of"]
+                }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "pedestrian_vehicle_proximity" }
+              }
+            ],
+            "merge_gap_segments": 1
+          },
+          "semantic_probes": ["pedestrian close to a moving vehicle"],
+          "investigation_questions": [
+            "Was the vehicle moving?",
+            "Who yielded?",
+            "Was it a crosswalk?"
+          ],
+          "wording": {
+            "title": "Vehicle–pedestrian conflict",
+            "review_action": "Add to the conflict hotspot report"
+          }
+        },
+        {
+          "id": "hard_braking",
+          "name": "Hard braking",
+          "description": "A vehicle brakes hard or stops abruptly.",
+          "severity": "high",
+          "rationale": "Hard braking often precedes conflicts.",
+          "detector": {
+            "all_of": [],
+            "any_of": [
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": ["brak", "sudden stop", "abrupt"]
+                }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "hard_braking" }
+              }
+            ],
+            "merge_gap_segments": 1
+          },
+          "semantic_probes": ["vehicle braking hard"],
+          "investigation_questions": [
+            "What preceded it?",
+            "Was there a following vehicle?"
+          ],
+          "wording": {
+            "title": "Hard braking",
+            "review_action": "Review preceding conflict"
+          }
+        },
+        {
+          "id": "lane_conflict",
+          "name": "Lane conflict",
+          "description": "Abrupt lane change, cut-off or merge conflict.",
+          "severity": "medium",
+          "rationale": "Lane conflicts elevate collision risk.",
+          "detector": {
+            "all_of": [],
+            "any_of": [
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": ["cut off", "merg", "swerv", "lane change"]
+                }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "lane_conflict" }
+              }
+            ],
+            "merge_gap_segments": 1
+          },
+          "semantic_probes": ["vehicle cuts into another lane abruptly"],
+          "investigation_questions": ["Did both vehicles adjust?"],
+          "wording": {
+            "title": "Lane conflict",
+            "review_action": "Add to conflict hotspot report"
+          }
+        },
+        {
+          "id": "stalled_vehicle",
+          "name": "Stalled vehicle",
+          "description": "A vehicle stopped in a travel lane.",
+          "severity": "medium",
+          "rationale": "Stopped vehicles create secondary collision risk.",
+          "detector": {
+            "all_of": [],
+            "any_of": [
+              {
+                "primitive": "persistence",
+                "params": {
+                  "entity": "car",
+                  "min_segments": 3,
+                  "stationary": true
+                }
+              },
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": [
+                    "stopped",
+                    "stalled",
+                    "hazard lights",
+                    "shoulder"
+                  ]
+                }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "stalled_vehicle" }
+              }
+            ],
+            "merge_gap_segments": 2
+          },
+          "semantic_probes": ["vehicle stopped in a travel lane"],
+          "investigation_questions": [
+            "How long?",
+            "Is traffic queuing behind it?"
+          ],
+          "wording": {
+            "title": "Stalled vehicle",
+            "review_action": "Dispatch a road crew if persistent"
+          }
+        },
+        {
+          "id": "congestion",
+          "name": "Traffic congestion",
+          "description": "Dense slow traffic.",
+          "severity": "low",
+          "rationale": "Context for other conflicts.",
+          "detector": {
+            "all_of": [],
+            "any_of": [
+              {
+                "primitive": "count_threshold",
+                "params": { "entity": "car", "op": ">=", "value": 15 }
+              },
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": ["congested", "heavy traffic", "queue"]
+                }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "congestion" }
+              }
+            ],
+            "merge_gap_segments": 2
+          },
+          "semantic_probes": ["dense slow traffic"],
+          "investigation_questions": ["Building or clearing?"],
+          "wording": {
+            "title": "Traffic congestion",
+            "review_action": "Monitor; no immediate action"
+          }
+        },
+        {
+          "id": "road_obstruction",
+          "name": "Road obstruction",
+          "description": "Object or debris on the road.",
+          "severity": "medium",
+          "rationale": "Obstructions force swerves near people.",
+          "detector": {
+            "all_of": [],
+            "any_of": [
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": [
+                    "debris",
+                    "object on the road",
+                    "obstruction"
+                  ]
+                }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "road_obstruction" }
+              }
+            ],
+            "merge_gap_segments": 1
+          },
+          "semantic_probes": ["object or debris on the road"],
+          "investigation_questions": [
+            "Are vehicles swerving around it?"
+          ],
+          "wording": {
+            "title": "Road obstruction",
+            "review_action": "Dispatch a road crew"
+          }
+        }
+      ]
+    },
+    "security": {
+      "id": "security",
+      "label": "Security / surveillance",
+      "cues": {
+        "caption_keywords": [
+          "entrance",
+          "door",
+          "gate",
+          "parking",
+          "corridor",
+          "sidewalk",
+          "building",
+          "surveillance"
+        ],
+        "yolo_classes": ["person", "car", "truck", "backpack", "handbag", "suitcase"],
+        "metadata_hints": {
+          "capture_type": ["streets", "crowds"],
+          "camera_id_contains": [
+            "neighborhood",
+            "smartspace",
+            "sf_streets"
+          ]
+        }
+      },
+      "entities": ["person", "vehicle", "bag"],
+      "corpus_cameras": [
+        "neighborhood_cam-1",
+        "smartspace_cam-1",
+        "sf_streets_cam-1",
+        "sf_streets_cam-2",
+        "sf_streets_cam-3",
+        "sf_streets_cam-4",
+        "sf_streets_cam-5"
+      ],
+      "wording_style": "neutral_mandatory",
+      "wording_rules": [
+        "potential incident",
+        "anomalous event",
+        "requires review",
+        "possible loss-prevention event"
+      ],
+      "forbidden_words": ["theft", "suspect", "criminal"],
+      "actions": [
+        "Review footage",
+        "Notify on-site security",
+        "Check access logs for <time>"
+      ],
+      "objectives": [
+        {
+          "id": "restricted_entry",
+          "name": "Restricted entry",
+          "description": "A person enters a restricted or marked area.",
+          "severity": "high",
+          "rationale": "Access anomalies need review.",
+          "detector": {
+            "all_of": [],
+            "any_of": [
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": [
+                    "restricted",
+                    "behind the counter",
+                    "staff door",
+                    "fence",
+                    "climb"
+                  ]
+                }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "restricted_entry" }
+              }
+            ],
+            "merge_gap_segments": 1
+          },
+          "semantic_probes": ["person enters a restricted area"],
+          "investigation_questions": [
+            "Entry point?",
+            "Duration?",
+            "Did they leave?"
+          ],
+          "wording": {
+            "title": "Potential restricted-entry event, requires review",
+            "review_action": "Review footage; notify on-site security"
+          }
+        },
+        {
+          "id": "loitering",
+          "name": "Loitering",
+          "description": "A person lingering in one spot for a long time.",
+          "severity": "low",
+          "rationale": "Unusual persistence may warrant review.",
+          "detector": {
+            "all_of": [
+              {
+                "primitive": "persistence",
+                "params": {
+                  "entity": "person",
+                  "min_segments": 4,
+                  "stationary": true
+                }
+              }
+            ],
+            "any_of": [
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": ["waiting", "standing", "lingering"]
+                }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "loitering" }
+              }
+            ],
+            "merge_gap_segments": 2
+          },
+          "semantic_probes": [
+            "person lingering in one spot for a long time"
+          ],
+          "investigation_questions": ["How long?", "Any interaction?"],
+          "wording": {
+            "title": "Anomalous lingering, requires review",
+            "review_action": "Review footage"
+          }
+        },
+        {
+          "id": "unattended_object",
+          "name": "Unattended object",
+          "description": "A bag left unattended.",
+          "severity": "medium",
+          "rationale": "Unattended objects need review.",
+          "detector": {
+            "all_of": [],
+            "any_of": [
+              {
+                "primitive": "persistence",
+                "params": {
+                  "entity": "backpack",
+                  "min_segments": 3,
+                  "stationary": true
+                }
+              },
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": ["left behind", "unattended"]
+                }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "unattended_object" }
+              }
+            ],
+            "merge_gap_segments": 2
+          },
+          "semantic_probes": ["bag left unattended"],
+          "investigation_questions": [
+            "Who left it (N−k)?",
+            "Was it picked up later?"
+          ],
+          "wording": {
+            "title": "Possible unattended object, requires review",
+            "review_action": "Notify on-site security"
+          }
+        },
+        {
+          "id": "object_moved",
+          "name": "Object moved",
+          "description": "An item removed from where it was.",
+          "severity": "low",
+          "rationale": "Neutral observation only.",
+          "detector": {
+            "all_of": [],
+            "any_of": [
+              {
+                "primitive": "disappearance",
+                "params": {
+                  "entity": "bag",
+                  "present_segments": 2,
+                  "absent_segments": 2
+                }
+              },
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": ["picked up", "removed", "carried away"]
+                }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "object_moved" }
+              }
+            ],
+            "merge_gap_segments": 1
+          },
+          "semantic_probes": ["item removed from where it was"],
+          "investigation_questions": ["Whose item? Neutral language only."],
+          "wording": {
+            "title": "Object movement event, requires review",
+            "review_action": "Review footage"
+          }
+        },
+        {
+          "id": "unusual_vehicle_stop",
+          "name": "Unusual vehicle stop",
+          "description": "A vehicle stops in the street and waits.",
+          "severity": "medium",
+          "rationale": "Unusual stops may relate to person–vehicle risk.",
+          "detector": {
+            "all_of": [],
+            "any_of": [
+              {
+                "primitive": "persistence",
+                "params": {
+                  "entity": "car",
+                  "min_segments": 3,
+                  "stationary": true
+                }
+              },
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": ["stops", "idling", "double-parked"]
+                }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "unusual_vehicle_stop" }
+              }
+            ],
+            "merge_gap_segments": 2
+          },
+          "semantic_probes": ["vehicle stops in the street and waits"],
+          "investigation_questions": [
+            "Duration?",
+            "Anyone entering or exiting?"
+          ],
+          "wording": {
+            "title": "Unusual vehicle stop, requires review",
+            "review_action": "Review footage"
+          }
+        },
+        {
+          "id": "crowd_buildup",
+          "name": "Crowd buildup",
+          "description": "A group of people gathering.",
+          "severity": "medium",
+          "rationale": "Crowd density can indicate operational issues.",
+          "detector": {
+            "all_of": [],
+            "any_of": [
+              {
+                "primitive": "count_threshold",
+                "params": { "entity": "person", "op": ">=", "value": 8 }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "crowd_buildup" }
+              }
+            ],
+            "merge_gap_segments": 2
+          },
+          "semantic_probes": ["group of people gathering"],
+          "investigation_questions": ["Growing?", "Movement pattern?"],
+          "wording": {
+            "title": "Crowd buildup, requires review",
+            "review_action": "Notify on-site security if unexpected"
+          }
+        },
+        {
+          "id": "person_vehicle_proximity",
+          "name": "Person near a passing vehicle",
+          "description": "A pedestrian close to a moving car on the street.",
+          "severity": "medium",
+          "rationale": "Cross-domain person–vehicle risk for street/security cams.",
+          "detector": {
+            "all_of": [
+              { "primitive": "cooccur", "params": { "a": "person", "b": "car" } }
+            ],
+            "any_of": [
+              {
+                "primitive": "bbox_proximity",
+                "params": {
+                  "a": "person",
+                  "b": "car",
+                  "max_gap_norm": 0.06,
+                  "min_frames": 2
+                }
+              },
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": ["crossing", "near", "passing"]
+                }
+              }
+            ],
+            "merge_gap_segments": 1
+          },
+          "semantic_probes": ["person walking close to a passing car"],
+          "investigation_questions": [
+            "Was the vehicle moving?",
+            "Was it a crosswalk?"
+          ],
+          "wording": {
+            "title": "Person near a passing vehicle",
+            "review_action": "Add to hotspot report"
+          }
+        }
+      ]
+    },
+    "retail": {
+      "id": "retail",
+      "label": "Retail operations",
+      "cues": {
+        "caption_keywords": [
+          "shelf",
+          "checkout",
+          "aisle",
+          "shopper",
+          "cart",
+          "register",
+          "store"
+        ],
+        "yolo_classes": ["person", "backpack", "handbag", "suitcase"],
+        "metadata_hints": {
+          "capture_type": ["retail", "malls"]
+        }
+      },
+      "entities": ["person", "cart", "bag", "product"],
+      "corpus_cameras": [],
+      "note": "No retail corpus indexed; use only with uploaded footage.",
+      "wording_style": "neutral_mandatory",
+      "wording_rules": [
+        "possible loss-prevention event, requires review"
+      ],
+      "forbidden_words": ["theft", "suspect", "criminal", "shoplift"],
+      "actions": [
+        "Ask staff to assist",
+        "Open another register",
+        "Send a cleanup crew",
+        "Review for loss prevention"
+      ],
+      "objectives": [
+        {
+          "id": "item_out_of_view",
+          "name": "Item out of view",
+          "description": "An item moved into a bag or out of view.",
+          "severity": "medium",
+          "rationale": "Neutral product-handling observation.",
+          "detector": {
+            "all_of": [],
+            "any_of": [
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": [
+                    "into a bag",
+                    "into pocket",
+                    "under jacket",
+                    "out of view"
+                  ]
+                }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "item_out_of_view" }
+              }
+            ],
+            "merge_gap_segments": 1
+          },
+          "semantic_probes": ["shopper puts an item into a bag"],
+          "investigation_questions": [
+            "Sequence shelf → bag → checkout or exit?"
+          ],
+          "wording": {
+            "title": "Possible loss-prevention event, requires review",
+            "review_action": "Review for loss prevention"
+          }
+        },
+        {
+          "id": "unattended_checkout",
+          "name": "Unattended checkout",
+          "description": "Customers waiting at an unattended checkout.",
+          "severity": "medium",
+          "rationale": "Operational gap.",
+          "detector": {
+            "all_of": [],
+            "any_of": [
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": [
+                    "no cashier",
+                    "unattended register",
+                    "waiting at checkout"
+                  ]
+                }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "unattended_checkout" }
+              }
+            ],
+            "merge_gap_segments": 2
+          },
+          "semantic_probes": [
+            "customers waiting at an unattended checkout"
+          ],
+          "investigation_questions": ["Queue length?", "Duration?"],
+          "wording": {
+            "title": "Unattended checkout",
+            "review_action": "Open another register; ask staff to assist"
+          }
+        },
+        {
+          "id": "queue_buildup",
+          "name": "Queue buildup",
+          "description": "Long checkout line.",
+          "severity": "low",
+          "rationale": "Operations signal.",
+          "detector": {
+            "all_of": [],
+            "any_of": [
+              {
+                "primitive": "count_threshold",
+                "params": { "entity": "person", "op": ">=", "value": 6 }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "queue_buildup" }
+              }
+            ],
+            "merge_gap_segments": 2
+          },
+          "semantic_probes": ["long checkout line"],
+          "investigation_questions": ["Growing?"],
+          "wording": {
+            "title": "Queue buildup",
+            "review_action": "Open another register"
+          }
+        },
+        {
+          "id": "spill",
+          "name": "Spill",
+          "description": "Spill or debris on the store floor.",
+          "severity": "medium",
+          "rationale": "Slip hazard.",
+          "detector": {
+            "all_of": [],
+            "any_of": [
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": ["spill", "liquid on floor", "broken"]
+                }
+              },
+              { "primitive": "caption_flag", "params": { "flag": "spill" } }
+            ],
+            "merge_gap_segments": 1
+          },
+          "semantic_probes": ["spill on the store floor"],
+          "investigation_questions": [
+            "Has anyone walked through it?"
+          ],
+          "wording": {
+            "title": "Spill on floor",
+            "review_action": "Send a cleanup crew"
+          }
+        },
+        {
+          "id": "restricted_entry",
+          "name": "Staff-only area entry",
+          "description": "A customer enters a staff-only area.",
+          "severity": "medium",
+          "rationale": "Access anomaly.",
+          "detector": {
+            "all_of": [],
+            "any_of": [
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": ["staff only", "stockroom", "behind counter"]
+                }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "restricted_entry" }
+              }
+            ],
+            "merge_gap_segments": 1
+          },
+          "semantic_probes": ["customer enters a staff-only area"],
+          "investigation_questions": ["Duration?", "Did they leave?"],
+          "wording": {
+            "title": "Possible restricted-entry event, requires review",
+            "review_action": "Ask staff to assist"
+          }
+        }
+      ]
+    },
+    "sports": {
+      "id": "sports",
+      "label": "Sports coaching",
+      "cues": {
+        "caption_keywords": [
+          "court",
+          "field",
+          "jersey",
+          "ball",
+          "shot",
+          "pass",
+          "rebound",
+          "turnover",
+          "basketball",
+          "hockey"
+        ],
+        "yolo_classes": ["person"],
+        "metadata_hints": {
+          "capture_type": ["sports"]
+        }
+      },
+      "entities": ["person", "ball"],
+      "corpus_cameras": [],
+      "note": "No sports/NHL footage indexed; flagged lane only with self-recorded upload. Severity maps: info→low, notable→medium.",
+      "severity_map": { "info": "low", "notable": "medium", "pattern": "high" },
+      "wording_style": "coaching",
+      "actions": [
+        "Clip for coaching review",
+        "Add to pattern report"
+      ],
+      "objectives": [
+        {
+          "id": "shot_attempt",
+          "name": "Shot attempt",
+          "description": "A player takes a shot.",
+          "severity": "low",
+          "rationale": "Core coaching event.",
+          "detector": {
+            "all_of": [],
+            "any_of": [
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": [
+                    "shoot",
+                    "shot",
+                    "layup",
+                    "dunk",
+                    "three-pointer"
+                  ]
+                }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "shot_made" }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "shot_missed" }
+              }
+            ],
+            "merge_gap_segments": 1
+          },
+          "semantic_probes": ["player takes a shot"],
+          "investigation_questions": [
+            "Open or contested?",
+            "Made?",
+            "Location?"
+          ],
+          "wording": {
+            "title": "Shot attempt",
+            "review_action": "Clip for coaching review"
+          }
+        },
+        {
+          "id": "open_look",
+          "name": "Open look",
+          "description": "A player wide open for a shot.",
+          "severity": "medium",
+          "rationale": "Defensive breakdown signal.",
+          "detector": {
+            "all_of": [],
+            "any_of": [
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": ["wide open", "unguarded", "open shot"]
+                }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "open_look" }
+              }
+            ],
+            "merge_gap_segments": 1
+          },
+          "semantic_probes": ["player wide open for a shot"],
+          "investigation_questions": [
+            "Which defensive action left them open (N−1, N−2)?"
+          ],
+          "wording": {
+            "title": "Open look",
+            "review_action": "Add to pattern report"
+          }
+        },
+        {
+          "id": "turnover",
+          "name": "Turnover",
+          "description": "Turnover or steal.",
+          "severity": "medium",
+          "rationale": "Coaching event.",
+          "detector": {
+            "all_of": [],
+            "any_of": [
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": [
+                    "steal",
+                    "turnover",
+                    "lost the ball",
+                    "out of bounds"
+                  ]
+                }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "turnover" }
+              }
+            ],
+            "merge_gap_segments": 1
+          },
+          "semantic_probes": ["turnover / steal"],
+          "investigation_questions": ["Pass or dribble?", "Pressure?"],
+          "wording": {
+            "title": "Turnover",
+            "review_action": "Clip for coaching review"
+          }
+        },
+        {
+          "id": "defensive_breakdown",
+          "name": "Defensive breakdown",
+          "description": "Defense fails to rotate or leaves a player open.",
+          "severity": "medium",
+          "rationale": "Primary coaching insight source.",
+          "detector": {
+            "all_of": [],
+            "any_of": [
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": [
+                    "late rotation",
+                    "missed assignment",
+                    "left open",
+                    "switch"
+                  ]
+                }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "defensive_breakdown" }
+              }
+            ],
+            "merge_gap_segments": 1
+          },
+          "semantic_probes": ["defense fails to rotate"],
+          "investigation_questions": ["Who was responsible?", "Result?"],
+          "wording": {
+            "title": "Defensive breakdown",
+            "review_action": "Add to pattern report"
+          }
+        },
+        {
+          "id": "fast_break",
+          "name": "Fast break",
+          "description": "Fast-break / transition play.",
+          "severity": "low",
+          "rationale": "Transition context.",
+          "detector": {
+            "all_of": [],
+            "any_of": [
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": ["fast break", "transition"]
+                }
+              },
+              {
+                "primitive": "caption_flag",
+                "params": { "flag": "fast_break" }
+              }
+            ],
+            "merge_gap_segments": 1
+          },
+          "semantic_probes": ["fast break"],
+          "investigation_questions": ["Numbers advantage?"],
+          "wording": {
+            "title": "Fast break",
+            "review_action": "Clip for coaching review"
+          }
+        }
+      ]
+    },
+    "general": {
+      "id": "general",
+      "label": "General environment",
+      "cues": {
+        "caption_keywords": [],
+        "yolo_classes": ["person"],
+        "metadata_hints": {}
+      },
+      "entities": ["person", "vehicle"],
+      "corpus_cameras": [],
+      "note": "Fallback when confidence < 0.6. Planner may add up to 3 environment-specific objectives from evidence.",
+      "wording_style": "neutral",
+      "actions": ["Review footage"],
+      "objectives": [
+        {
+          "id": "notable_activity",
+          "name": "Notable activity",
+          "description": "Unusual, sudden, or risky activity.",
+          "severity": "low",
+          "rationale": "Catch-all when domain is unclear.",
+          "detector": {
+            "all_of": [],
+            "any_of": [
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": [
+                    "unusual",
+                    "sudden",
+                    "falls",
+                    "crowd",
+                    "running"
+                  ]
+                }
+              }
+            ],
+            "merge_gap_segments": 1
+          },
+          "semantic_probes": ["unusual or risky activity"],
+          "investigation_questions": [
+            "What changed before and after?"
+          ],
+          "wording": {
+            "title": "Notable activity",
+            "review_action": "Review footage"
+          }
+        },
+        {
+          "id": "person_vehicle_proximity",
+          "name": "Person / vehicle proximity",
+          "description": "A person close to a vehicle.",
+          "severity": "medium",
+          "rationale": "Cross-corpus person–vehicle anchor when domain is general.",
+          "detector": {
+            "all_of": [
+              {
+                "primitive": "cooccur",
+                "params": { "a": "person", "b": "vehicle" }
+              }
+            ],
+            "any_of": [
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": ["near", "close", "crossing", "in front of"]
+                }
+              }
+            ],
+            "merge_gap_segments": 1
+          },
+          "semantic_probes": ["person close to a moving vehicle"],
+          "investigation_questions": [
+            "Was the vehicle moving?",
+            "How close?"
+          ],
+          "wording": {
+            "title": "Person / vehicle proximity",
+            "review_action": "Review footage"
+          }
+        },
+        {
+          "id": "scene_change",
+          "name": "Scene change",
+          "description": "YOLO entity set changes markedly between segments.",
+          "severity": "low",
+          "rationale": "Useful when captions are weak.",
+          "detector": {
+            "all_of": [],
+            "any_of": [
+              {
+                "primitive": "caption_terms",
+                "params": {
+                  "any": ["suddenly", "appears", "leaves"]
+                }
+              }
+            ],
+            "merge_gap_segments": 1
+          },
+          "semantic_probes": ["sudden change in the scene"],
+          "investigation_questions": ["What entered or left?"],
+          "wording": {
+            "title": "Scene change",
+            "review_action": "Review footage"
+          }
+        }
+      ]
+    }
+  }
+}

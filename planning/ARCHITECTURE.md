@@ -96,17 +96,35 @@ This is the build-day reference for all agents. Read `PROJECT_CONTEXT.md` first.
 
 ## 4. Data model (`models.py`)
 
-IDs are strings. Times are seconds within the parent video (`t_start`, `t_end`) plus an optional wall-clock `captured_at` if the metadata has one *(verify)*.
+**Frozen 2026-10-09 (P3 / G1).** App-facing field names below are stable. VSS wire names differ — map in `repository.py` via `VideoSegment.from_vss_segment` / `video_ref_from_explore` (see also `planning/HACKATHON_UNKNOWN.md` Architect freeze notes).
+
+IDs are strings. Times are seconds within the parent video (`t_start`, `t_end`). **No capture wall-clock** exists in the live index (only `upload_timestamp` = ingest time); do not rely on `captured_at` / `time_window`.
+
+**VSS → app mapping (fixtures 2026-10-09):**
+
+| App field | VSS wire |
+|---|---|
+| `VideoSegment.source_uri` | `source` |
+| `VideoSegment.index` | `segment_number` (1-based) |
+| `VideoSegment.t_start` / `t_end` | `segment_start_sec` / `segment_end_sec` |
+| `VideoSegment.caption` | `reasoning_content` |
+| `VideoSegment.flags` | parsed from `FLAGS:` line in caption (absent until re-ingest) |
+| `DetectionSummary.classes` | `object_counts` (JSON string) or sidecar |
+| Explore parents list key | **`videos`** (fixture `explore_all.json`; not `chunks`) |
+| Explore parent times | `chunk_duration_sec`, `upload_timestamp`, `stream_id`, `preview_source` |
+| Detections bbox | pixel **xyxy** on `video_shape` `[H,W]`; normalize by frame diagonal for `bbox_proximity` |
+| Segment length | **5.0 s** typical; warehouse chunks often 10 s / 2 segs; street 30 s / 6 segs |
+| Cosmos model id | `nvidia/cosmos3-nano-reasoner` (not `cosmos3-reason`) |
 
 ```jsonc
 // A camera / feed. Usually one per camera_id; groups many parent videos (chunks).
 VideoSource { id, camera_id, location, capture_type, label, videos: [VideoRef],
               segment_count, domain_hint_from_metadata?, status: "unconfigured|configuring|configured|specializing|monitoring" }
-VideoRef    { original_video, filename, stream_id?, total_segments, preview_source, uploaded_at? }
+VideoRef    { original_video, filename, stream_id?, total_segments, preview_source, uploaded_at?, chunk_duration_sec? }
 
 VideoSegment { source_uri /* s3 segment */, original_video, index /* 1-based */, t_start, t_end,
                caption /* reasoning_content */, flags: [str] /* parsed from FLAGS: line if present */,
-               yolo: DetectionSummary?, camera_id, location }
+               yolo: DetectionSummary?, camera_id, location, filename?, duration?, upload_timestamp?, object_classes? }
 DetectionSummary { classes: {label: max_count}, frames_sampled, has_sidecar,
                    pairs: [{a, b, min_gap_norm, frames_close}] /* computed by rules.bbox_proximity */ }
 
@@ -123,30 +141,35 @@ RuleCall     { primitive /* from DOMAIN_PROFILES.md vocabulary */, params: {} }
 
 MonitoringProfile { source_id, domain, version, objectives: [MonitoringObjective],
                information_gaps: [str] /* what current captions don't describe */,
-               generated_prompt: CosmosPrompt?, severity_rules: {}, created_at, mode }
+               generated_prompt: CosmosPrompt?, severity_rules: {}, created_at, mode,
+               dropped?: [{id, name, reason}] /* §5a: objectives judged not applicable */ }
 CosmosPrompt { text /* <= 800 chars, enforced */, chars, covers: [objective_id], rationale, template_fallback: bool }
 
 PotentialEvent { id, source_id, objective_id, segment: str /* source_uri */, signals: [Signal],
                rule_score, llm: {is_event, confidence, reason, evidence_quote}? , status: "candidate|rejected|investigating|incident" }
 Signal { kind: "rule|caption_flag|semantic|llm|temporal|second_look", name, value, detail }
 
-Evidence { role: "before|event|after|related", segment: str, t_start, t_end, caption, yolo?, clip_url /* api/clip?source=… */ }
+Evidence { role: "before|event|after|related", segment: str, t_start, t_end, caption, yolo?, clip_url /* api/clip?source=… */,
+           camera_id?, similarity? }
 Investigation { event_id, verdict: "confirmed|likely|unclear|false_positive", timeline: [{t, text, segment}],
                start_segment, peak_segment, end_segment, entities: [str], why_flagged, counter_evidence,
-               related: [Evidence], second_look?: {verdict, text}, confidence: Confidence }
+               related: [Evidence], second_look?: {verdict, text}, confidence: Confidence,
+               answers?: [{question, answer}], temporal_support? }
 Confidence { value /*0..1*/, components: [{name, value, weight, explanation}] }   // always explainable
 
 Incident { id, source_id, domain, objective_id, event_type, title, severity, confidence: Confidence,
            summary, started_at, peak_at, ended_at, camera_id, location, entities,
-           evidence: [Evidence], investigation: Investigation, recommended_action, created_at }
+           evidence: [Evidence], investigation: Investigation, recommended_action, created_at,
+           search_hint?, replay_pos?, mode? /* §5a UI extras */ }
 
 ReingestJob { id, source_id, original_video, chunk_count, clips, prompt: CosmosPrompt, vss_job_id?,
               status: "planned|preparing|reingesting|indexing|verifying|ready|failed",
               progress: {completed_chunks, total_chunks, indexed_segments, total_segments},
-              snapshot_before: [{segment, caption}], after: [{segment, caption}], error?, timestamps }
+              snapshot_before: [{segment, caption}], after: [{segment, caption}], error?, timestamps,
+              filename?, eta?, reason?, started_at?, finished_at?, failed_stage?, verify?: {changed, total, with_terms} }
 AnalysisEvolution { source_id, steps: [{stage: "generic|objective|prompt|reanalyzed|event", text, ref}] }
 
-PipelineRun  { source_id, steps: [{key, label, status: "pending|running|done|failed|skipped", summary, started_at, ended_at, trace_url?}] }
+PipelineRun  { source_id, steps: [{key, label?, status: "pending|running|done|failed|skipped", summary, started_at, ended_at, trace_url?}] }
 // step keys: classify, plan, prompt, reingest, monitor, detect, investigate, incident
 ```
 

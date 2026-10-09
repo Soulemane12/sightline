@@ -2,6 +2,24 @@
 
 QA fills the **Answer** column during P1/P2. The lead writes decisions at the top. Anything still blank at 10:30 gets its fallback by default.
 
+## Architect contract freeze (P3 · 2026-10-09)
+
+Shipped: `app/models.py`, `app/domains.json`, `app/prompts.py`. §5a UI shapes unchanged (frontend already built). Differences vs planning docs / P1 notes:
+
+| # | Planning / P1 claim | Reality (fixtures) | Contract decision |
+|---|---|---|---|
+| C1 | Explore list key is `chunks` (P0b S6) | Fixture `explore_all.json` top key is **`videos`** (+ `total`, `count`) | Map `videos` (accept `chunks` as alias). Corrects S6. |
+| C2 | App times `t_start`/`t_end`, caption | Wire: `segment_start_sec`/`segment_end_sec`/`reasoning_content` | Normalized in `VideoSegment`; `from_vss_segment` maps |
+| C3 | Optional `captured_at` / `time_window` | Only `upload_timestamp` (ingest); no capture wall-clock | `time_window` marked `available: false` in `domains.json` |
+| C4 | Detections normalized boxes | Pixel **xyxy**; `video_shape` `[H,W]`; 30 fps; ~150 frames/5 s | `bbox_proximity` divides gap by frame diagonal |
+| C5 | Segment ~5 s | Confirmed **5.0 s**; warehouse often 2 segs/10 s chunk | Default `segment_seconds: 5` on sources list |
+| C6 | Cosmos `nvidia/cosmos3-reason` | Live id **`nvidia/cosmos3-nano-reasoner`** | Documented; GPU client resolves `/v1/models` |
+| C7 | YOLO forklift | **No forklift** in `objects[]` | `entity_map.forklift.yolo = []`; caption/ATLAS synonyms |
+| C8 | `custom_prompt` 800 | Confirmed 800; upload max **100 MB** | `CUSTOM_PROMPT_MAX_CHARS=800`; status `limits.upload_mb=100` |
+| C9 | Primary use case | Dangerous person–vehicle; D1 warehouse + NYC streets | `domains.json` `use_case` + warehouse/traffic priors |
+
+**Files frozen additive-only after G1:** `models.py` (Architect only). Backend agents import; do not reshape §5a fields.
+
 ## Decisions (LOCKED)
 - **D1 primary:** `sdg_warehouse_cam-2` / warehouse3
 - **D1 secondary:** `nyc_streets_cam-1` / new_york / streets
@@ -9,7 +27,7 @@ QA fills the **Answer** column during P1/P2. The lead writes decisions at the to
 - **Runtime overrides (locked):** Cosmos model `nvidia/cosmos3-nano-reasoner`; YOLO has **no forklift** (forklift = Cosmos/captions/LLM); W&B primary `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B`, fallback `meta-llama/Llama-3.3-70B-Instruct`; W&B calls need **User-Agent**
 - **Reserved chunks:** early = TBD by lead · demo_reserved = TBD
 - **In-pod VSS URL:** `http://video-backend-service:8000` (public Ingress hostname does **not** resolve inside pods)
-- **Differences from ARCHITECTURE.md:** see P0b; plus in-pod VSS must use ClusterIP Service, not `$INGRESS_URL`
+- **Differences from ARCHITECTURE.md:** see **Architect contract freeze** + P0b; in-pod VSS must use ClusterIP Service, not `$INGRESS_URL`; explore key is **`videos`** (S6 corrected)
 
 ## P0b staleness (doc → reality → fix)
 
@@ -20,7 +38,7 @@ QA fills the **Answer** column during P1/P2. The lead writes decisions at the to
 | S3 | GPU URLs in env / team config | `COSMOS3_*` / `YOLO_*` / `CANARY_*` **not** in `team-22.config`; skill hardcodes `GPU_HOST=166.19.38.112` | Follow `gpu/model-health` skill; optional env overrides if set |
 | S4 | WANDB keys in team config | `WANDB_*` present in **VM env**, absent from `team-22.config` | Read from env for app Secret; do not expect them in `.config` |
 | S5 | Old kubeconfig path `/config/kubeconfig` | Skill: `KUBECONFIG=/config/${NS}-k8s.yaml` → `/config/team-22-k8s.yaml` | Skill wins (ARCHITECTURE §3 already notes this) |
-| S6 | Explore returns `videos` | Response key is **`chunks`** (+ `total`, timelines, metadata) | Map `chunks` → sources in `repository.py` |
+| S6 | Explore returns `videos` | Fixture `explore_all.json` key is **`videos`** (+ `total`, `count`). Earlier P1 note claiming `chunks` was wrong. | Map `videos` → sources in `repository.py` (alias `chunks` if seen) |
 | S7 | Segment timing `t_start`/`t_end` / caption field | Fields: `segment_start_sec`, `segment_end_sec`, `duration`, caption in **`reasoning_content`** | Architect: freeze models from fixtures |
 | S8 | VM has pip/venv ready | No system `pip` / `ensurepip`; `python3 -m venv` fails without `python3.12-venv` | Use `get-pip.py --user --break-system-packages` or install venv package; note for deploy image (`python:3.12-slim` has pip) |
 | S9 | W&B OpenAI Python client “just works” | Bare `urllib` without User-Agent → Cloudflare **1010**; `curl` + UA works | Set a User-Agent (or use `openai`/`httpx` with UA) in `llm.py` |
