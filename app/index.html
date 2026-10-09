@@ -13,13 +13,16 @@
     document.write('<base href="' + p.replace(/["<>]/g, '') + '">');
   })();
 </script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 <header class="topbar">
   <div class="brand" data-nav="/">
-    <span class="logo">◉</span>
-    <span class="name">SIGHTLINE</span>
+    <span class="logo" aria-hidden="true"></span>
+    <span class="name">Sightline</span>
     <span class="tagline">Self-configuring video safety agents</span>
   </div>
   <div class="monitor-state" id="monitor-state"></div>
