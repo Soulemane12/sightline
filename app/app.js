@@ -878,9 +878,9 @@ VIEWS.new = {
       (up.status === 'done' ? `<div class="small muted" style="padding:10px">Done in ${esc(up.elapsed_s)} s · ${esc(up.incidents)} incident(s)</div>` : ''));
     const dur = f.duration || up.duration || 1;
     const marks = v.markers || [];
-    setHTML($('#nf-markers'), `<div class="tl" style="margin-top:8px"><div class="tl-labels"><div class="tl-l">Markers</div></div><div class="tl-lanes">
-        <div class="tl-lane">${marks.map(m => `<span class="tl-mark ${esc(m.status === 'tagged' ? 'tag' : m.status === 'incident' ? (m.severity || 'medium') : 'low')}" style="left:${Math.min(100, 100 * (m.t || 0) / dur).toFixed(2)}%;${m.status === 'rejected' ? 'opacity:.35;' : ''}" data-action="nf-seek" data-t="${esc(m.t_start ?? m.t)}" title="${esc(fmtT(m.t))} · ${esc(m.title)} · ${esc(m.status)}${m.confidence != null ? ' · ' + pct(m.confidence) : ''}"></span>`).join('')}</div>
-      </div></div>`);
+    S.fresh.dur = dur;
+    setHTML($('#nf-markers'), clipTimelineHTML(dur, v.windows || [], marks, up.status === 'done'));
+    syncClipHead();
     const cl = v.classification, pf = v.profile || {};
     const pr = pf.generated_prompt;
     setHTML($('#nf-results'), cl ? `<div class="cols2">
@@ -900,6 +900,66 @@ VIEWS.new = {
       <div style="margin-top:6px">${pane('Analysis versions', evolutionHTML(v.evolution))}</div>` : '');
   },
 };
+
+// ----- uploaded clip timeline: same layout as a feed's (TC ruler, footage, markers); seeks the clip's video
+const fmtClipT = (sec, dur) => dur < 60 ? `0:${(Math.max(0, sec)).toFixed(1).padStart(4, '0')}` : fmtTC(sec).slice(0, 8);
+function clipTimelineHTML(dur, windows, marks, analyzed) {
+  const ticks = Array.from({ length: 9 }, (_, i) =>
+    `<span class="tl-tick" style="left:${(i * 12.5).toFixed(2)}%">${esc(fmtClipT(dur * i / 8, dur))}</span>`).join('');
+  const wins = windows.length ? windows : Array.from({ length: Math.min(28, Math.max(4, Math.ceil(dur / 2))) }, (_, i, a) => ({ t_start: dur * i / a.length, t_end: dur * (i + 1) / a.length }));
+  const clips = wins.map(w => {
+    const a = Math.max(0, w.t_start / dur), b = Math.min(1, (w.t_end ?? w.t_start) / dur);
+    return `<span class="tl-clip ${analyzed ? 'done' : ''}" style="left:calc(${(a * 100).toFixed(2)}% + 1px);width:calc(${(Math.max(0.005, b - a) * 100).toFixed(2)}% - 2px)" title="${esc(fmtT(w.t_start))}–${esc(fmtT(w.t_end))}"></span>`;
+  }).join('');
+  const mk = marks.map(m => `<span class="tl-mark ${esc(m.status === 'tagged' ? 'tag' : m.status === 'incident' ? (m.severity || 'medium') : 'low')}" style="left:${Math.min(100, 100 * (m.t || 0) / dur).toFixed(2)}%;${m.status === 'rejected' ? 'opacity:.35;' : ''}" data-action="nf-seek" data-t="${esc(m.t_start ?? m.t)}" title="${esc(fmtT(m.t))} · ${esc(m.title)} · ${esc(m.status === 'tagged' ? 'your tag' : m.status)}${m.confidence != null ? ' · ' + pct(m.confidence) : ''}"></span>`).join('');
+  const n = { incident: 0, tagged: 0 };
+  marks.forEach(m => { if (n[m.status] != null) n[m.status]++; });
+  return `<div class="tl" style="margin-top:8px">
+      <div class="tl-labels"><div class="tl-l ruler-l">TC</div><div class="tl-l">Footage</div><div class="tl-l">Markers</div></div>
+      <div class="tl-lanes" data-seek="1" title="Click or drag to move through the clip">
+        <div class="tl-ruler">${ticks}</div>
+        <div class="tl-lane">${clips}</div>
+        <div class="tl-lane">${mk}</div>
+        <div class="playhead" id="nf-head" style="left:0%"></div>
+      </div>
+    </div>
+    <div class="tl-foot">Uploaded clip · <span id="nf-tc">${esc(fmtClipT(0, dur))}</span> / ${esc(fmtClipT(dur, dur))} · ${wins.length} analysis windows · ${n.incident} incident(s) · ${n.tagged} tag(s) · click or drag the timeline to scrub · click a marker to jump to it</div>`;
+}
+function syncClipHead() {
+  const v = $('#nf-video'), head = $('#nf-head'), dur = (S.fresh && S.fresh.dur) || (v && v.duration) || 0;
+  if (!v || !head || !dur) return;
+  head.style.left = Math.min(100, 100 * v.currentTime / dur).toFixed(2) + '%';
+  const tc = $('#nf-tc');
+  if (tc) tc.textContent = fmtClipT(v.currentTime, dur);
+}
+let SEEK = null;
+function seekFrac(e) {
+  const r = SEEK.getBoundingClientRect();
+  return Math.max(0, Math.min(1, (e.clientX - r.left) / (r.width || 1)));
+}
+function seekTo(f) {
+  const v = $('#nf-video'), dur = (S.fresh && S.fresh.dur) || (v && v.duration) || 0;
+  if (!v || !dur) return;
+  v.currentTime = Math.min(dur - 0.05, f * dur);
+  syncClipHead();
+}
+document.addEventListener('pointerdown', e => {
+  const lanes = e.target.closest('.tl-lanes[data-seek]');
+  if (!lanes || e.target.closest('.tl-mark') || e.button !== 0) return;
+  e.preventDefault();
+  SEEK = lanes;
+  const v = $('#nf-video');
+  if (v) v.pause();
+  seekTo(seekFrac(e));
+});
+document.addEventListener('pointermove', e => { if (SEEK) seekTo(seekFrac(e)); });
+document.addEventListener('pointerup', () => { SEEK = null; });
+['timeupdate', 'seeked', 'loadedmetadata'].forEach(ev => document.addEventListener(ev, e => { if (e.target && e.target.id === 'nf-video') syncClipHead(); }, true));
+document.addEventListener('play', e => {
+  if (!e.target || e.target.id !== 'nf-video') return;
+  const v = e.target;
+  (function tick() { syncClipHead(); if (!v.paused && !v.ended && v.isConnected) requestAnimationFrame(tick); })();
+}, true);
 
 function uploadWithProgress(path, fd, onProgress) {
   return new Promise((resolve, reject) => {

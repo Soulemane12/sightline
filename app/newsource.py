@@ -54,6 +54,11 @@ def to_vast_enabled() -> bool:
     return os.getenv("NEWSOURCE_TO_VAST", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _count(v: Any) -> int:
+    """The engine summary reports counts as ints; older shapes used lists."""
+    return v if isinstance(v, int) else len(v or [])
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -355,7 +360,7 @@ class NewSourceService:
             n_inc = len(self.store.list_incidents(source_id=sid))
             self._put_meta(sid, status="configured", upload={**(self._meta(sid).get("upload") or {}), "status": "done",
                            "elapsed_s": round(time.monotonic() - t_all, 1), "incidents": n_inc,
-                           "candidates": len((summary or {}).get("candidates") or [])})
+                           "candidates": _count((summary or {}).get("candidates"))})
         except Exception as e:  # noqa: BLE001
             log.warning("newsource %s failed: %s", sid, e)
             self._put_meta(sid, status="failed", upload={**(self._meta(sid).get("upload") or {}), "status": "failed",
@@ -492,7 +497,7 @@ class NewSourceService:
             "pipeline": self.store.get_pipeline(sid) or {"source_id": sid, "steps": []},
             "classification": self.store.get_classification(sid), "profile": prof,
             "evolution": self.store.get_evolution(sid) or {"source_id": sid, "steps": []},
-            "markers": markers, "incidents": incidents,
+            "markers": markers, "incidents": incidents, "windows": meta.get("windows") or [],
         }
 
     def list(self) -> list[dict[str, Any]]:

@@ -168,3 +168,8 @@ def test_cosmos_down_fails_honestly(monkeypatch):
     sid = asyncio.run(go())
     up = svc.view(sid)["upload"]
     assert up["status"] == "failed" and "Cosmos could not describe" in up["error"]
+
+
+def test_candidate_counts_accept_ints_and_lists():
+    # The engine reports `candidates` as an int; len() on it failed the upload after incidents were raised.
+    assert ns._count(5) == 5 and ns._count([1, 2]) == 2 and ns._count(None) == 0
