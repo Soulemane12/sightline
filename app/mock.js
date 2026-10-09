@@ -419,10 +419,15 @@
         return jobs[id];
       }
       if (r[2] === 'evolution') return { source_id: src.id, steps: evolution[src.id] || [] };
-      if (r[2] === 'segments') return [];
+      if (r[2] === 'segments') {
+        return Array.from({ length: src.total }, (_, i) => ({ source_uri: segUri(src.id, i), original_video: `mock://${src.id}`, index: i + 1,
+          t_start: i * SEG, t_end: (i + 1) * SEG, camera_id: src.id,
+          caption: (INCIDENTS.find(x => x.source_id === src.id && x.seg === i) || {}).summary || `Segment ${i + 1} of ${src.label}: routine activity.` }));
+      }
       const job = latestJob[src.id] ? jobState(jobs[latestJob[src.id]]) : null;
       return Object.assign(clone({ id: src.id, camera_id: src.camera_id, label: src.label, location: src.location, capture_type: src.capture_type, segment_count: src.segment_count,
-        status: configureAt[src.id] && since(configureAt[src.id]) < 7500 ? 'configuring' : src.status, classification: src.classification || null, profile: src.profile || null, segment_seconds: SEG }),
+        status: configureAt[src.id] && since(configureAt[src.id]) < 7500 ? 'configuring' : src.status, classification: src.classification || null, profile: src.profile || null, segment_seconds: SEG,
+        videos: [{ original_video: `mock://${src.id}`, filename: `${src.id}.mp4`, total_segments: src.total }] }),
         { pipeline: src.pipeline || pipeline(src), reingest: job ? clone(job) : null, evolution: { source_id: src.id, steps: evolution[src.id] || [] }, replay: replay(src),
           incidents: visibleIncidents().filter(i => i.source_id === src.id) });
     }

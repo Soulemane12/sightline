@@ -149,6 +149,12 @@ def parse_second_look(text: str) -> Optional[SecondLook]:
     return SecondLook(verdict=m.group(1).upper(), text=(w.group(1).strip() if w else "")[:300])
 
 
+def incident_id(source_id: str, objective_id: str, segment: str) -> str:
+    """Stable id per (camera, objective, moment): re-running monitoring updates the same incident."""
+    import hashlib
+    return "inc-" + hashlib.sha1(f"{source_id}|{objective_id}|{segment}".encode()).hexdigest()[:12]
+
+
 def second_look_question(objective: MonitoringObjective) -> str:
     what = (objective.description or objective.name or objective.id).strip().rstrip(".")
     return f"Does this clip show the following: {what}? Answer YES only if it is clearly visible."
@@ -558,7 +564,7 @@ class InvestigationEngine:
 
         peak = by_uri.get(peak_uri, ev_seg)
         incident = Incident(
-            id=f"inc-{ev.id}",
+            id=incident_id(ev.source_id, ev.objective_id, ev.segment),
             source_id=ev.source_id,
             domain=domain,
             objective_id=ev.objective_id,

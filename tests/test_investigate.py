@@ -301,3 +301,10 @@ def test_second_look_asks_a_confirmation_question():
     q = inv.second_look_question(o)
     assert q.startswith("Does this clip show the following: A person within close range of a moving forklift?")
     assert "Was the forklift moving" not in q
+
+
+def test_rerun_updates_the_same_incident():
+    eng = engine()
+    a = asyncio.run(eng.investigate(EVENT))
+    b = asyncio.run(eng.investigate({**EVENT, "id": "ev-2"}))  # same moment, new event id
+    assert a.id == b.id and len(eng._store.list_incidents()) == 1

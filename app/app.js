@@ -192,14 +192,111 @@ function timelineHTML(src, incs) {
     `<span class="tl-mark ${esc(i.severity)}" style="left:${(i.replay_pos * 100).toFixed(2)}%" data-nav="/incident/${enc(i.id)}" title="${esc(i.title)} · ${esc(SEV_LABEL[i.severity] || '')} · ${pct(i.confidence && i.confidence.value)}"></span>`).join('');
   return `<div class="tl">
       <div class="tl-labels"><div class="tl-l ruler-l">${segSec ? 'TC' : 'SEG'}</div><div class="tl-l">Footage</div><div class="tl-l">Incidents</div></div>
-      <div class="tl-lanes">
+      <div class="tl-lanes" data-scrub="${esc(src.id)}" title="Click or drag to scrub through this camera's footage">
         <div class="tl-ruler">${ticks}</div>
         <div class="tl-lane">${clips}</div>
         <div class="tl-lane">${marks}</div>
         ${pos != null ? `<div class="playhead" style="left:${(pos * 100).toFixed(2)}%" title="Replay clock"></div>` : ''}
+        ${S.scrub && S.scrub.id === src.id ? `<div class="scrubhead" style="left:${(S.scrub.frac * 100).toFixed(2)}%"><span>${esc(scrubLabel(src, S.scrub.frac))}</span></div>` : ''}
       </div>
     </div>
-    <div class="tl-foot">${r && r.active ? `Archive replay ${esc(r.speed || '')}× · segment ${esc(r.segment)}/${esc(total)} · each segment is evaluated as the playhead passes it` : 'Not monitoring. Start monitoring from the camera page.'}</div>`;
+    <div class="tl-foot">${r && r.active ? `Archive replay ${esc(r.speed || '')}× · segment ${esc(r.segment)}/${esc(total)} · ` : ''}click or drag the timeline to scrub · click a marker to open its incident</div>`;
+}
+
+function scrubLabel(src, frac) {
+  const total = (src.replay && src.replay.total_segments) || src.segment_count || 0;
+  const segSec = src.segment_seconds || 5;
+  return fmtTC(Math.floor(frac * total) * segSec).slice(0, 8);
+}
+
+const VIDEO_CACHE = {};   // source id → videos[] (replay order)
+const SEG_CACHE = {};     // original_video → segments[]
+async function sourceVideos(id) {
+  if (!VIDEO_CACHE[id]) VIDEO_CACHE[id] = (await GET(`api/sources/${enc(id)}`)).videos || [];
+  return VIDEO_CACHE[id];
+}
+async function videoSegments(id, ov) {
+  if (!SEG_CACHE[ov]) SEG_CACHE[ov] = await GET(`api/sources/${enc(id)}/segments?video=${enc(ov)}`);
+  return SEG_CACHE[ov];
+}
+
+/** Map a timeline position to the real segment (videos in replay order) and show it in the viewer. */
+async function scrubCommit(id, frac) {
+  S.scrub = { id, frac, loading: true };
+  renderScrubViewer();
+  try {
+    const vids = await sourceVideos(id);
+    const total = vids.reduce((a, v) => a + (v.total_segments || 0), 0);
+    if (!total) throw new Error('no segments');
+    let g = Math.min(total - 1, Math.floor(frac * total)), i = 0;
+    while (i < vids.length - 1 && g >= (vids[i].total_segments || 0)) { g -= vids[i].total_segments || 0; i++; }
+    const segs = await videoSegments(id, vids[i].original_video);
+    const seg = segs[Math.min(g, segs.length - 1)];
+    if (!S.scrub || S.scrub.id !== id || S.scrub.frac !== frac) return;  // a newer scrub won
+    S.scrub = { id, frac, seg, clip: i + 1, clips: vids.length, local: g + 1, filename: vids[i].filename };
+  } catch (e) {
+    if (S.scrub && S.scrub.frac === frac) S.scrub = { id, frac, error: e.message };
+  }
+  renderScrubViewer();
+}
+
+function renderScrubViewer() {
+  const box = $('#ov-player');
+  const sc = S.scrub;
+  if (!box || !sc || sc.id !== S.selected) return;
+  const back = `<button class="btn" data-action="scrub-clear" style="position:absolute;top:8px;right:8px;z-index:3">Back to latest incident</button>`;
+  if (sc.loading || sc.error || !sc.seg) {
+    setHTML(box, `<div class="player">${back}<div class="ph"><div><div class="big">${sc.error ? 'Clip unavailable' : 'Loading clip…'}</div><div>${esc(sc.error || '')}</div></div></div></div>`);
+    return;
+  }
+  const seg = sc.seg;
+  setHTML(box, `<div style="position:relative;width:100%;height:100%">${back}${player({ segment: seg.source_uri, camera_id: seg.camera_id, t_start: seg.t_start }, {
+    autoplay: true, badge: 'SCRUB', cam: seg.camera_id,
+    overlay: `<span class="mono small">clip ${esc(sc.clip)}/${esc(sc.clips)} · segment ${esc(sc.local)}</span><br><span class="muted">${captionHTML(String(seg.caption || '').slice(0, 220))}</span>`,
+  })}</div>`);
+}
+
+let DRAG = null;
+function scrubFrac(e) {
+  const r = DRAG.lanes.getBoundingClientRect();
+  return Math.max(0, Math.min(0.9999, (e.clientX - r.left) / (r.width || 1)));
+}
+document.addEventListener('pointerdown', e => {
+  const lanes = e.target.closest('.tl-lanes[data-scrub]');
+  if (!lanes || e.target.closest('.tl-mark') || e.button !== 0) return;
+  e.preventDefault();
+  DRAG = { lanes, id: lanes.dataset.scrub };
+  S.selected = DRAG.id;
+  moveScrubHead(scrubFrac(e));
+});
+document.addEventListener('pointermove', e => { if (DRAG) moveScrubHead(scrubFrac(e)); });
+document.addEventListener('pointerup', e => {
+  if (!DRAG) return;
+  const f = scrubFrac(e), id = DRAG.id;
+  DRAG = null;
+  scrubCommit(id, f);
+});
+function moveScrubHead(f) {
+  let head = DRAG.lanes.querySelector('.scrubhead');
+  if (!head) { head = document.createElement('div'); head.className = 'scrubhead'; head.appendChild(document.createElement('span')); DRAG.lanes.appendChild(head); }
+  head.style.left = (f * 100).toFixed(2) + '%';
+  const src = sourceById(DRAG.id);
+  if (src) head.firstChild.textContent = scrubLabel(src, f);
+  S.scrub = { ...(S.scrub || {}), id: DRAG.id, frac: f };
+}
+
+/** The same moment can be re-investigated on every monitoring run; keep one incident per moment. */
+function dedupeIncidents(list) {
+  const best = new Map();
+  for (const inc of list) {
+    const inv = inc.investigation || {};
+    const ev = (inc.evidence || []).find(e => e.role === 'event');
+    const key = [inc.source_id, inc.objective_id, inv.peak_segment || (ev && ev.segment) || inc.peak_at].join('|');
+    const cur = best.get(key);
+    const conf = (inc.confidence && inc.confidence.value) || 0;
+    if (!cur || conf > ((cur.confidence && cur.confidence.value) || 0)) best.set(key, inc);
+  }
+  return [...best.values()];
 }
 
 // ---------------------------------------------------------------- top bar + sidebar
@@ -299,7 +396,9 @@ VIEWS.overview = {
     const latest = mine[0];
     const ev = latest && (latest.evidence || []).find(e => e.role === 'event');
     const replay = (src && src.replay) || null;
-    if (latest && ev) {
+    if (S.scrub && S.scrub.id === S.selected && (S.scrub.seg || S.scrub.loading || S.scrub.error)) {
+      renderScrubViewer();
+    } else if (latest && ev) {
       setHTML($('#ov-player', main), player(ev, {
         badge: 'LATEST INCIDENT', autoplay: true, cam: latest.camera_id,
         overlay: `${sevPill(latest.severity)} <b style="margin-left:6px">${esc(latest.title)}</b> <span class="muted">· ${pct(latest.confidence && latest.confidence.value)}</span>`,
@@ -311,8 +410,9 @@ VIEWS.overview = {
       }));
     }
     const segSec = src && src.segment_seconds;
+    const scrubbing = S.scrub && S.scrub.id === S.selected && src;
     setHTML($('#ov-transport', main), `<span>${esc(src ? src.camera_id : '')}</span>
-      <span class="tc" title="${segSec ? 'Replay position' : 'Replay position (segment length unknown)'}">${replay ? (segSec ? esc(fmtTC(replay.segment * segSec)) : 'SEG ' + esc(replay.segment)) : '--:--:--:--'}</span>
+      <span class="tc" title="${scrubbing ? 'Scrub position' : 'Replay position'}">${scrubbing ? esc(fmtTC(Math.floor(S.scrub.frac * ((replay && replay.total_segments) || src.segment_count || 0)) * (segSec || 5))) : replay ? (segSec ? esc(fmtTC(replay.segment * segSec)) : 'SEG ' + esc(replay.segment)) : '--:--:--:--'}</span>
       <span class="r">${replay && replay.active ? `${esc(replay.speed)}× · ${esc(replay.segment)}/${esc(replay.total_segments)}` : 'paused'}</span>`);
 
     const fresh = new Set();
@@ -332,7 +432,7 @@ VIEWS.overview = {
       ${st ? `<span title="Segments that passed deterministic gates and were evaluated"><b>${esc(st.candidates ?? '–')}</b>evaluated</span>
       <span title="Candidates the investigation judged unclear or false (kept for audit)"><b>${esc(st.rejected ?? '–')}</b>rejected</span>` : ''}
       <span><b>${incidents.length}</b>incidents</span></span>`);
-    setHTML($('#ov-timeline', main), timelineHTML(src, mine));
+    if (!DRAG) setHTML($('#ov-timeline', main), timelineHTML(src, mine));
   },
 };
 
@@ -461,7 +561,8 @@ VIEWS.source = {
           ${cl && cl.mode === 'rules_only' ? '<span class="tag warn">rules-only</span>' : ''}</h1>
         <div class="meta">${esc(d.camera_id)} · ${esc(d.location || '–')} · ${esc(d.capture_type || '–')} · ${esc(d.segment_count ?? '?')} segments · ${cl && cl.camera_type ? esc(cl.camera_type) + ' camera · ' : ''}${esc(d.status)}</div></div>
       <div class="btn-row">
-        <button class="btn" data-action="configure" data-id="${esc(d.id)}">${cl ? 'Re-run self-configuration' : 'Configure this camera'}</button>
+        ${cl ? `<button class="btn" data-action="configure" data-id="${esc(d.id)}">Re-run self-configuration</button>`
+             : addMonitorInline(d.id, true)}
         ${pf ? (monitoring
           ? `<button class="btn danger" data-action="monitor-stop" data-id="${esc(d.id)}">Stop monitoring</button>`
           : `<button class="btn primary" data-action="monitor-start" data-id="${esc(d.id)}">Start monitoring</button>`) : ''}
@@ -496,7 +597,7 @@ VIEWS.source = {
 
     setHTML($('#sv-reingest', main), reingestHTML(d, d.reingest));
     setHTML($('#sv-evo', main), evolutionHTML(d.evolution));
-    const incs = sortIncidents(d.incidents || S.incidents.filter(i => i.source_id === id));
+    const incs = sortIncidents(dedupeIncidents(d.incidents || S.incidents.filter(i => i.source_id === id)));
     setHTML($('#sv-incidents', main), incs.length ? `<div class="feed">${incs.map(i => feedItem(i, false)).join('')}</div>` : '<div class="empty" style="padding:12px">No incidents from this camera yet.</div>');
   },
 };
@@ -561,6 +662,70 @@ VIEWS.incident = {
   },
 };
 
+const AM = {};  // camera id → {btn, line} while an Add to Monitor flow is running (survives re-renders)
+
+function addMonitorButton(id, stay) {
+  return `<div class="btn-row" style="margin-top:8px">${addMonitorInline(id, stay)}</div>`;
+}
+function addMonitorInline(id, stay) {
+  const src = sourceById(id);
+  const busy = AM[id];
+  const on = !busy && src && src.status === 'monitoring';
+  const label = busy ? busy.btn : on ? 'Monitoring · open' : '＋ Add to Monitor';
+  return `<button class="btn ${on ? '' : 'primary'}" data-action="add-monitor" data-id="${esc(id)}"${stay ? ' data-stay="1"' : ''}${busy ? ' disabled' : ''}>${esc(label)}</button>
+    <span class="small muted mono" data-am-status="${esc(id)}">${esc(busy ? busy.line : '')}</span>`;
+}
+
+async function waitJob(jobId, timeoutMs, onTick) {
+  const t0 = Date.now();
+  for (;;) {
+    const j = await GET(`api/jobs/${enc(jobId)}`);
+    if (j.status === 'done' || j.status === 'completed') return j.result;
+    if (j.status === 'failed') throw new Error(j.error || 'job failed');
+    if (Date.now() - t0 > timeoutMs) throw new Error('timed out');
+    if (onTick) await onTick();
+    await new Promise(r => setTimeout(r, 1500));
+  }
+}
+
+/** Search or camera page → one click: configure (if needed) → start monitoring → open the camera. */
+async function addToMonitor(el) {
+  const id = el.dataset.id;
+  const stay = el.dataset.stay === '1';
+  const say = (btn, line) => {
+    AM[id] = { btn, line: line || '' };
+    document.querySelectorAll(`[data-action="add-monitor"][data-id="${CSS.escape(id)}"]`).forEach(b => { b.textContent = btn; b.disabled = true; });
+    document.querySelectorAll(`[data-am-status="${CSS.escape(id)}"]`).forEach(x => { x.textContent = line || ''; });
+  };
+  const src = sourceById(id);
+  if (AM[id]) return;
+  if (src && src.status === 'monitoring') { S.selected = id; if (!stay) nav('/source/' + enc(id)); return; }
+  try {
+    if (!src || !src.classification) {
+      say('Configuring…', 'Sightline is looking at this camera');
+      const r = await POST(`api/sources/${enc(id)}/configure`, {});
+      await waitJob(r.job_id, 180000, async () => {
+        try {
+          const run = await GET(`api/pipeline/${enc(id)}`);
+          const cur = (run.steps || []).filter(s => s.status === 'running' || s.status === 'done').pop();
+          if (cur) say('Configuring…', `${cur.label || STEP_LABELS[cur.key] || cur.key}${cur.summary ? ': ' + cur.summary : ''}`);
+        } catch (_) { /* progress is best-effort */ }
+      });
+    }
+    say('Starting…', 'Starting autonomous monitoring');
+    await POST(`api/sources/${enc(id)}/monitor`, {});
+    delete AM[id];
+    toast('Sightline configured this camera and started monitoring', 'info');
+    S.selected = id;
+    if (!stay) nav('/source/' + enc(id));
+  } catch (e) {
+    delete AM[id];
+    document.querySelectorAll(`[data-am-status="${CSS.escape(id)}"]`).forEach(x => { x.textContent = 'Failed: ' + e.message; });
+    document.querySelectorAll(`[data-action="add-monitor"][data-id="${CSS.escape(id)}"]`).forEach(b => { b.disabled = false; b.textContent = '＋ Add to Monitor'; });
+    throw e;
+  }
+}
+
 VIEWS.search = {
   mount(main) {
     const r = S.route;
@@ -569,7 +734,7 @@ VIEWS.search = {
         <input type="text" name="q" placeholder="forklift close to a worker" value="${esc(r.q)}">
         <select name="source"><option value="">All cameras</option>${S.sources.map(s => `<option value="${esc(s.id)}" ${s.id === r.source ? 'selected' : ''}>${esc(s.label || s.camera_id)}</option>`).join('')}</select>
         <button class="btn primary">Search</button></form>
-      <div class="small muted" style="margin-top:8px">Follow-up tool. Sightline raises incidents without searches; use this to look for more moments like one it found.</div>`,
+      <div class="small muted" style="margin-top:8px">Find any footage in the VAST archive, then <b>Add to Monitor</b>: Sightline works out what the camera is, decides what to watch for, writes its own prompt and starts monitoring. No rules or queries to write.</div>`,
       { right: 'VAST hybrid search · Cosmos-Embed1' })}
       ${pane('Results', '<div class="empty">Enter a query.</div>', { id: 'search-results' })}</div>`;
     $('#search-form', main).addEventListener('submit', e => {
@@ -587,7 +752,8 @@ VIEWS.search = {
       const hits = Array.isArray(res) ? res : (res && res.results) || [];
       box.innerHTML = hits.length ? `<div class="results">${hits.map(h => `<div class="rel">${player(h)}
         <div class="mono small" style="margin-top:4px">${esc(h.camera_id || '')} · ${esc(fmtTC(h.t_start))}${h.similarity != null ? ' · ' + pct(h.similarity) : ''}</div>
-        <div>${esc(String(h.caption || '').slice(0, 200))}</div></div>`).join('')}</div>` : '<div class="empty">No matches.</div>';
+        <div>${esc(String(h.caption || '').slice(0, 200))}</div>
+        ${h.camera_id ? addMonitorButton(h.camera_id) : ''}</div>`).join('')}</div>` : '<div class="empty">No matches.</div>';
     } catch (e) { box.innerHTML = `<div class="empty">Search failed: ${esc(e.message)}</div>`; }
   },
 };
@@ -805,7 +971,9 @@ async function render() {
 }
 
 const ACTIONS = {
-  'select-source': el => { S.selected = el.dataset.id; },
+  'select-source': el => { S.selected = el.dataset.id; S.scrub = null; },
+  'scrub-clear': () => { S.scrub = null; const b = $('#ov-player'); if (b) b._html = null; },
+  'add-monitor': el => addToMonitor(el),
   'ov-tab': el => { S.ovTab = el.dataset.tab; },
   'configure': async el => { await POST(`api/sources/${enc(el.dataset.id)}/configure`, {}); toast('Sightline is looking at this camera…', 'info'); },
   'monitor-start': async el => { await POST(`api/sources/${enc(el.dataset.id)}/monitor`, {}); toast('Monitoring started (archive replay)', 'info'); },
@@ -856,7 +1024,7 @@ async function refresh() {
   try {
     const [sources, incidents] = await Promise.all([GET('api/sources'), GET('api/incidents')]);
     S.sources = Array.isArray(sources) ? sources : [];
-    S.incidents = Array.isArray(incidents) ? incidents : [];
+    S.incidents = dedupeIncidents(Array.isArray(incidents) ? incidents : []);
     if (!S.selected || !sourceById(S.selected)) S.selected = (S.sources.find(s => s.status === 'monitoring') || S.sources[0] || {}).id || null;
     renderTop();
     renderSidebar();
