@@ -43,6 +43,15 @@ GENERIC_PROMPT = (
     "they are doing. NOTABLE: anything unusual or risky."
 )
 REANALYSIS_LABEL = "Re-analysis with Sightline's prompt (direct Cosmos, not indexed)"
+VAST_LABEL = "Stored in VAST · DataEngine indexing with Sightline's prompt"
+VAST_POLL_S = float(os.getenv("NEWSOURCE_VAST_POLL_S", "20"))
+VAST_MAX_WAIT_S = float(os.getenv("NEWSOURCE_VAST_MAX_WAIT_S", str(45 * 60)))
+_MIME = {".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm",
+         ".mkv": "video/x-matroska", ".avi": "video/x-msvideo"}
+
+
+def to_vast_enabled() -> bool:
+    return os.getenv("NEWSOURCE_TO_VAST", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _now_iso() -> str:
@@ -319,6 +328,7 @@ class NewSourceService:
             run["steps"] = look_step + [s for s in run.get("steps", []) if s.get("key") != "look"]
             self.store.put("pipeline", sid, run, source_id=sid)
             prompt_text = ((result.get("prompt") or {}).get("text") or prompts.short_template(result["classification"]["domain"]))
+            self._spawn(self._submit_to_vast(sid, data, filename, prompt_text))
 
             # 3) re-analysis of every frame with Sightline's own prompt
             self._step(sid, "reanalyze", REANALYSIS_LABEL, "running")
@@ -350,6 +360,76 @@ class NewSourceService:
             log.warning("newsource %s failed: %s", sid, e)
             self._put_meta(sid, status="failed", upload={**(self._meta(sid).get("upload") or {}), "status": "failed",
                            "error": f"{type(e).__name__}: {str(e)[:240]}"})
+
+    # ------------------------------------------------------------ VAST: store the footage and index it
+
+    def _spawn(self, coro) -> None:
+        t = asyncio.create_task(coro)
+        self._tasks.add(t)
+        t.add_done_callback(self._tasks.discard)
+
+    def _vast(self, sid: str, **upd: Any) -> dict[str, Any]:
+        up = dict(self._meta(sid).get("upload") or {})
+        vast = {**(up.get("vast") or {}), **upd}
+        up["vast"] = vast
+        self._put_meta(sid, upload=up)
+        return vast
+
+    async def _submit_to_vast(self, sid: str, data: bytes, filename: str, prompt_text: str) -> None:
+        """Upload the clip into VAST (S3 → DataEngine → VastDB) with Sightline's own prompt."""
+        if not to_vast_enabled():
+            self._step(sid, "vast", VAST_LABEL, "skipped", "disabled on this deployment")
+            return
+        self._step(sid, "vast", VAST_LABEL, "running", "uploading to VAST…")
+        mime = _MIME.get(Path(filename).suffix.lower(), "video/mp4")
+        form = {"is_public": "false", "camera_id": sid, "location": "uploaded", "tags": "sightline,upload",
+                "custom_prompt": prompt_text[: prompts.CUSTOM_PROMPT_MAX_CHARS]}
+        try:
+            resp = await self.vss.upload_video({"file": (filename, data, mime)}, form)
+        except Exception as e:  # noqa: BLE001
+            self._vast(sid, status="failed", error=f"{type(e).__name__}: {str(e)[:200]}")
+            self._step(sid, "vast", VAST_LABEL, "failed", f"VAST upload failed: {type(e).__name__}")
+            return
+        key = str(resp.get("object_key") or "")
+        if resp.get("success") is False or not key:
+            self._vast(sid, status="failed", error=str(resp.get("message") or "no object_key returned")[:200])
+            self._step(sid, "vast", VAST_LABEL, "failed", "VAST did not accept the upload")
+            return
+        self._vast(sid, status="indexing", object_key=key, submitted_at=_now_iso(), prompt_chars=len(form["custom_prompt"]))
+        self._step(sid, "vast", VAST_LABEL, "running", f"saved to VAST S3 ({key.rsplit('/', 1)[-1]}) · indexing…")
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < VAST_MAX_WAIT_S:
+            if await self.poll_vast_once(sid):
+                return
+            await asyncio.sleep(VAST_POLL_S)
+        self._vast(sid, status="indexing", note=f"still indexing after {int(VAST_MAX_WAIT_S // 60)} min (VAST queue)")
+        self._step(sid, "vast", VAST_LABEL, "running", "saved to VAST S3 · still indexing (VAST queue)")
+
+    async def poll_vast_once(self, sid: str) -> bool:
+        """True once VAST reports the clip indexed (real numbers from the dashboard, never assumed)."""
+        vast = (self._meta(sid).get("upload") or {}).get("vast") or {}
+        key = vast.get("object_key") or ""
+        base = key.rsplit("/", 1)[-1]
+        try:
+            stats = await self.vss.dashboard_stats(scope="mine")
+        except Exception:  # noqa: BLE001
+            return False
+        for v in (stats or {}).get("recent_videos") or []:
+            ident = f"{v.get('original_video') or ''} {v.get('filename') or ''}"
+            if base and base in ident:
+                indexed = int(v.get("indexed_clips") or v.get("unique_segments") or 0)
+                expected = int(v.get("expected_segments") or 0)
+                if indexed and (not expected or indexed >= expected):
+                    self._vast(sid, status="indexed", indexed_at=_now_iso(), segments=indexed,
+                               original_video=v.get("original_video"))
+                    self._step(sid, "vast", VAST_LABEL, "done",
+                               f"indexed in VastDB · {indexed} segments · searchable in VAST as {sid}")
+                    return True
+                self._vast(sid, status="indexing", segments=indexed, expected=expected)
+                self._step(sid, "vast", VAST_LABEL, "running",
+                           f"saved to VAST S3 · indexing {indexed}/{expected or '?'} segments")
+                return False
+        return False
 
     def _evolution(self, sid: str, generic: str, special: str, prompt_text: str) -> None:
         prof = self.store.get_profile(sid) or {}

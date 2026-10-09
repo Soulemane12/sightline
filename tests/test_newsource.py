@@ -50,6 +50,25 @@ class DownLLM:
         return fallback()
 
 
+class FakeVSS:
+    def __init__(self, indexed=True):
+        self.uploads, self.indexed = [], indexed
+
+    async def upload_video(self, files, data):
+        self.uploads.append((files["file"][0], data))
+        return {"success": True, "object_key": "team-22/20261009_150000_driveway.mp4"}
+
+    async def dashboard_stats(self, scope="all"):
+        n = 6 if self.indexed else 0
+        return {"recent_videos": [{"original_video": "s3://b/team-22/20261009_150000_driveway.mp4",
+                                   "indexed_clips": n, "expected_segments": 6}]}
+
+
+async def drain(svc):
+    while svc._tasks:
+        await asyncio.gather(*list(svc._tasks))
+
+
 def make_store():
     st = Store()
     st._tmp_path = Path(tempfile.mkdtemp()) / "state.json"
@@ -72,13 +91,14 @@ def test_upload_flow_end_to_end_rules_only(monkeypatch):
     monkeypatch.setattr(ns, "UPLOAD_DIR", Path(tempfile.mkdtemp()))
     store = make_store()
     gpu = FakeGPU()
-    svc = ns.NewSourceService(gpu=gpu, llm=DownLLM(), store=store)
+    vss = FakeVSS()
+    svc = ns.NewSourceService(gpu=gpu, llm=DownLLM(), store=store, vss=vss)
     frames = [b"\xff\xd8jpeg"] * 6
     times = [1.0, 3.0, 5.0, 7.0, 9.0, 11.0]
 
     async def go():
         out = await svc.create(filename="driveway.mp4", data=b"\x00\x00\x00\x18ftypmp42", frames=frames, times=times, duration=12.0)
-        await asyncio.gather(*list(svc._tasks))
+        await drain(svc)
         return out["source_id"]
 
     sid = asyncio.run(go())
@@ -99,6 +119,32 @@ def test_upload_flow_end_to_end_rules_only(monkeypatch):
         for ev in inc["evidence"]:
             assert ev["clip_url"].startswith(f"api/newsource/{sid}/video#t=")
     assert svc.list()[0]["source_id"] == sid
+    # the footage went into VAST with Sightline's own prompt, and indexing was confirmed by VAST
+    fname, form = vss.uploads[0]
+    assert fname == "driveway.mp4" and form["camera_id"] == sid and form["custom_prompt"]
+    assert len(form["custom_prompt"]) <= 800 and form["is_public"] == "false"
+    vast = view["upload"]["vast"] if "vast" in view["upload"] else svc.view(sid)["upload"]["vast"]
+    assert vast["status"] == "indexed" and vast["segments"] == 6
+    step = next(s for s in svc.view(sid)["pipeline"]["steps"] if s["key"] == "vast")
+    assert step["status"] == "done" and "indexed in VastDB" in step["summary"]
+
+
+def test_vast_pending_is_reported_honestly(monkeypatch):
+    monkeypatch.setattr(ns, "UPLOAD_DIR", Path(tempfile.mkdtemp()))
+    monkeypatch.setattr(ns, "VAST_POLL_S", 0.0)
+    monkeypatch.setattr(ns, "VAST_MAX_WAIT_S", 0.05)
+    store = make_store()
+    svc = ns.NewSourceService(gpu=FakeGPU(), llm=DownLLM(), store=store, vss=FakeVSS(indexed=False))
+
+    async def go():
+        out = await svc.create(filename="driveway.mp4", data=b"x", frames=[b"j"] * 3, times=[1, 2, 3], duration=4)
+        await drain(svc)
+        return out["source_id"]
+
+    sid = asyncio.run(go())
+    vast = svc.view(sid)["upload"]["vast"]
+    step = next(s for s in svc.view(sid)["pipeline"]["steps"] if s["key"] == "vast")
+    assert vast["status"] == "indexing" and step["status"] == "running" and "still indexing" in step["summary"]
 
 
 def test_cosmos_down_fails_honestly(monkeypatch):
@@ -112,11 +158,11 @@ def test_cosmos_down_fails_honestly(monkeypatch):
             raise RuntimeError("yolo down")
 
     store = make_store()
-    svc = ns.NewSourceService(gpu=DeadGPU(), llm=DownLLM(), store=store)
+    svc = ns.NewSourceService(gpu=DeadGPU(), llm=DownLLM(), store=store, vss=FakeVSS())
 
     async def go():
         out = await svc.create(filename="x.mp4", data=b"x", frames=[b"j"] * 3, times=[1, 2, 3], duration=4)
-        await asyncio.gather(*list(svc._tasks))
+        await drain(svc)
         return out["source_id"]
 
     sid = asyncio.run(go())

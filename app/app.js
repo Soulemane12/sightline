@@ -331,7 +331,7 @@ function renderTop() {
 }
 
 /** A feed is a source you added (configured or monitoring); the rest of the archive lives in Search. */
-const isFeed = src => !!src && (['monitoring', 'configuring', 'configured', 'specializing'].includes(src.status) || !!AM[src.id]);
+const isFeed = src => !!src && !String(src.id).startsWith('upload-') && (['monitoring', 'configuring', 'configured', 'specializing'].includes(src.status) || !!AM[src.id]);
 const feedState = src => src.status === 'monitoring' ? 'Monitoring' : (src.status === 'configuring' || AM[src.id]) ? 'Setting up…' : 'Paused';
 function defaultFeed() {
   const feeds = S.sources.filter(isFeed);
