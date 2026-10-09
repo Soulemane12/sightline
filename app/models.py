@@ -26,7 +26,7 @@ SourceStatus = Literal[
 ]
 EventStatus = Literal["candidate", "rejected", "investigating", "incident"]
 Verdict = Literal["confirmed", "likely", "unclear", "false_positive"]
-EvidenceRole = Literal["before", "event", "after", "related"]
+EvidenceRole = Literal["before", "event", "after", "related", "angle"]  # angle: same scenario, other camera view
 SignalKind = Literal[
     "rule", "caption_flag", "semantic", "llm", "temporal", "second_look"
 ]
@@ -393,6 +393,7 @@ class Evidence(BaseModel):
     clip_url: str = ""
     camera_id: Optional[str] = None
     similarity: Optional[float] = None
+    camera_view: Optional[str] = None  # e.g. "ceiling_01" for role="angle" (SDG run_N_seed_M multi-view)
 
 
 class ConfidenceComponent(BaseModel):
