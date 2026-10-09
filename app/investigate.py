@@ -403,8 +403,13 @@ class InvestigationEngine:
         original_video: str | None = None,
         persist: bool = True,
     ) -> Optional[Incident]:
+        # Keep original_video on the raw dict — PotentialEvent.extra="ignore" would drop it.
         raw = event if isinstance(event, dict) else event.model_dump()
-        hint_video = original_video or raw.get("original_video")
+        hint_video = (
+            original_video
+            or raw.get("original_video")
+            or (getattr(event, "original_video", None) if not isinstance(event, dict) else None)
+        )
         ev = event if isinstance(event, PotentialEvent) else PotentialEvent.model_validate(raw)
         prof = self._profile(ev.source_id, profile)
         objective = self._objective(prof, ev.objective_id)
@@ -415,7 +420,9 @@ class InvestigationEngine:
         segs, idx = await self._locate(ev.source_id, ev.segment, hint_video)
         if idx < 0:
             log.warning("event %s: segment not found in source %s", ev.id, ev.source_id)
-            self._persist_event(ev, "rejected", note="segment not found", persist=persist)
+            self._persist_event(
+                ev, "rejected", note="segment not found", persist=persist, original_video=hint_video
+            )
             return None
         span = {ev.start_segment or ev.segment, ev.segment, ev.end_segment or ev.segment}
         lo, hi = max(0, idx - CONTEXT_RADIUS), min(len(segs), idx + CONTEXT_RADIUS + 1)
@@ -436,8 +443,15 @@ class InvestigationEngine:
         question = (objective.investigation_questions[0] if objective.investigation_questions
                     else f"Is {objective.description or objective.name} visible in this clip?")
         probe = objective.semantic_probes[0] if objective.semantic_probes else objective.name
+        # Prefer parent original_video from the segment (always present on VideoSegment)
+        parent_ov = ev_seg.original_video or hint_video or ""
         angles_raw, related, second = await asyncio.gather(
-            self.repo.find_other_angles(original_video=ev_seg.original_video, t_start=ev_seg.t_start, t_end=ev_seg.t_end),
+            self.repo.find_other_angles(
+                original_video=parent_ov,
+                t_start=ev_seg.t_start,
+                t_end=ev_seg.t_end,
+                exclude_original=parent_ov or None,
+            ),
             self._related(probe, ev.source_id, set(sid_to_uri.values())),
             self._second_look(ev_seg, question),
             return_exceptions=True,
@@ -450,7 +464,17 @@ class InvestigationEngine:
             except Exception:  # noqa: BLE001
                 continue
         related = related if isinstance(related, list) else []
-        second = second if isinstance(second, SecondLook) else None
+        second_look_status = "ok"
+        if isinstance(second, SecondLook):
+            pass
+        elif isinstance(second, Exception):
+            second_look_status = f"fallback:{type(second).__name__}"
+            log.info("second look exception: %s", second_look_status)
+            second = None
+        else:
+            # None → timeout / disabled / parse miss (clean fallback)
+            second = None
+            second_look_status = "skipped"
 
         # 5) investigation verdict
         user = prompts.fill(
@@ -516,7 +540,14 @@ class InvestigationEngine:
             summary=resp.summary, recommended_action=resp.recommended_action,
         )
         if resp.verdict not in INCIDENT_VERDICTS:
-            self._persist_event(ev, "rejected", investigation=investigation, persist=persist)
+            self._persist_event(
+                ev,
+                "rejected",
+                investigation=investigation,
+                persist=persist,
+                original_video=parent_ov,
+                extra={"second_look_status": second_look_status},
+            )
             return None
 
         peak = by_uri.get(peak_uri, ev_seg)
@@ -546,22 +577,42 @@ class InvestigationEngine:
         )
         if persist:
             self.store.put("incident", incident.id, incident, source_id=ev.source_id)
-            self._persist_event(ev, "incident", investigation=investigation, persist=True)
+            self._persist_event(
+                ev,
+                "incident",
+                investigation=investigation,
+                persist=True,
+                original_video=parent_ov,
+                extra={"second_look_status": second_look_status, "incident_id": incident.id},
+            )
             self._touch_pipeline(ev.source_id)
         return incident
 
     # ------------------------------------------------------------ persistence
 
-    def _persist_event(self, ev: PotentialEvent, status: str, *, investigation: Investigation | None = None,
-                       note: str = "", persist: bool = True) -> None:
+    def _persist_event(
+        self,
+        ev: PotentialEvent,
+        status: str,
+        *,
+        investigation: Investigation | None = None,
+        note: str = "",
+        persist: bool = True,
+        original_video: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
         if not persist:
             return
         payload = ev.model_dump()
         payload["status"] = status
+        if original_video:
+            payload["original_video"] = original_video
         if investigation is not None:
             payload["investigation"] = investigation.model_dump()
         if note:
             payload["note"] = note
+        if extra:
+            payload.update(extra)
         self.store.put("event", ev.id, payload, source_id=ev.source_id)
         self._touch_pipeline(ev.source_id)
 

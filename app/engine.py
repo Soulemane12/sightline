@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 import prompts
 from configurator import load_domains, _structured
+from investigate import investigate_event
 from llm import get_llm
 from models import (
     EvaluateLLMResponse,
@@ -32,6 +33,9 @@ from rules import (
     load_entity_map,
 )
 from store import Store, get_store
+
+# Cap how many candidates we investigate per monitor sweep (second look is expensive).
+INVESTIGATE_LIMIT = 5
 
 log = logging.getLogger("sightline.engine")
 
@@ -208,9 +212,9 @@ class MonitoringEngine:
         candidates: list[dict[str, Any]],
         *,
         use_llm: bool,
-    ) -> list[PotentialEvent]:
-        """candidates: [{id, seg, score, signals}]"""
-        events: list[PotentialEvent] = []
+    ) -> list[dict[str, Any]]:
+        """candidates: [{id, seg, score, signals}] → event dicts (with original_video)."""
+        events: list[dict[str, Any]] = []
         if not candidates:
             return events
 
@@ -357,59 +361,101 @@ class MonitoringEngine:
                 else:
                     status = "rejected"
 
-            ev = PotentialEvent(
-                id=rid,
-                source_id=c["source_id"],
-                objective_id=objective.id,
-                segment=seg.source_uri,
-                signals=c["signals"],
-                rule_score=float(c["score"]),
-                llm=llm_eval,
-                status=status,  # type: ignore[arg-type]
-                t_start=seg.t_start,
-                t_end=seg.t_end,
-                start_segment=seg.source_uri,
-                peak_segment=seg.source_uri,
-                end_segment=seg.source_uri,
+            # Dict payload preserves original_video (PotentialEvent.extra ignores it).
+            events.append(
+                {
+                    "id": rid,
+                    "source_id": c["source_id"],
+                    "objective_id": objective.id,
+                    "segment": seg.source_uri,
+                    "original_video": seg.original_video or c.get("original_video") or "",
+                    "signals": [s.model_dump() if hasattr(s, "model_dump") else s for s in c["signals"]],
+                    "rule_score": float(c["score"]),
+                    "llm": llm_eval.model_dump() if llm_eval else None,
+                    "status": status,
+                    "t_start": seg.t_start,
+                    "t_end": seg.t_end,
+                    "start_segment": seg.source_uri,
+                    "peak_segment": seg.source_uri,
+                    "end_segment": seg.source_uri,
+                    "caption": seg.caption or "",
+                }
             )
-            events.append(ev)
         return events
 
     def _merge_events(
-        self, events: list[PotentialEvent], merge_gap: int, ordered_uris: list[str]
-    ) -> list[PotentialEvent]:
+        self, events: list[dict[str, Any]], merge_gap: int, ordered_uris: list[str]
+    ) -> list[dict[str, Any]]:
         """Merge consecutive positive candidates within merge_gap_segments."""
-        positives = [e for e in events if e.status == "candidate"]
+        positives = [e for e in events if e.get("status") == "candidate"]
         if not positives:
             return events
         uri_pos = {u: i for i, u in enumerate(ordered_uris)}
-        positives.sort(key=lambda e: uri_pos.get(e.segment, 10**9))
-        merged: list[PotentialEvent] = []
-        rejected = [e for e in events if e.status != "candidate"]
-        current: PotentialEvent | None = None
+        positives.sort(key=lambda e: uri_pos.get(e.get("segment") or "", 10**9))
+        merged: list[dict[str, Any]] = []
+        rejected = [e for e in events if e.get("status") != "candidate"]
+        current: dict[str, Any] | None = None
         for e in positives:
             if current is None:
-                current = e
+                current = dict(e)
                 continue
-            i0 = uri_pos.get(current.end_segment or current.segment, -100)
-            i1 = uri_pos.get(e.segment, 10**9)
-            same_obj = current.objective_id == e.objective_id
+            i0 = uri_pos.get(current.get("end_segment") or current.get("segment") or "", -100)
+            i1 = uri_pos.get(e.get("segment") or "", 10**9)
+            same_obj = current.get("objective_id") == e.get("objective_id")
             if same_obj and 0 <= i1 - i0 <= merge_gap + 1:
-                # extend
-                current = current.model_copy(
-                    update={
-                        "end_segment": e.segment,
-                        "t_end": e.t_end if e.t_end is not None else current.t_end,
-                        "rule_score": max(current.rule_score, e.rule_score),
-                        "signals": list(current.signals) + list(e.signals),
-                    }
-                )
+                current = {
+                    **current,
+                    "end_segment": e.get("segment"),
+                    "t_end": e.get("t_end") if e.get("t_end") is not None else current.get("t_end"),
+                    "rule_score": max(float(current.get("rule_score") or 0), float(e.get("rule_score") or 0)),
+                    "signals": list(current.get("signals") or []) + list(e.get("signals") or []),
+                }
             else:
                 merged.append(current)
-                current = e
+                current = dict(e)
         if current:
             merged.append(current)
         return rejected + merged
+
+    @staticmethod
+    def _investigate_priority(ev: dict[str, Any]) -> int:
+        """Prefer ATLAS contact / moving-forklift scenes for investigation order."""
+        cap = (ev.get("caption") or "").lower()
+        score = 0
+        if "atlas" in cap:
+            score += 4
+        if any(t in cap for t in ("contact", "grabs", "climb", "approaches", "makes contact")):
+            score += 3
+        if any(t in cap for t in ("begins to move", "starts moving", "moves forward", "moving")):
+            score += 2
+        if "forklift" in cap and "person" in cap.replace("personnel", " person "):
+            score += 1
+        score += int(10 * float((ev.get("llm") or {}).get("confidence") or 0))
+        return score
+
+    async def _investigate_candidates(
+        self, source_id: str, candidates: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Call P8 investigate_event for each accepted candidate (original_video required)."""
+        ranked = sorted(candidates, key=self._investigate_priority, reverse=True)
+        incidents: list[dict[str, Any]] = []
+        for ev in ranked[:INVESTIGATE_LIMIT]:
+            payload = dict(ev)
+            payload["status"] = "investigating"
+            if not payload.get("original_video"):
+                log.warning("candidate %s missing original_video — investigating without hint", ev.get("id"))
+            self.store.put("event", payload["id"], payload, source_id=source_id)
+            try:
+                inc = await investigate_event(payload)
+            except Exception as e:  # noqa: BLE001
+                log.warning("investigate_event failed for %s: %s", payload.get("id"), e)
+                payload["status"] = "candidate"
+                payload["note"] = f"investigate_error:{type(e).__name__}"
+                self.store.put("event", payload["id"], payload, source_id=source_id)
+                continue
+            if inc is not None:
+                incidents.append(inc.model_dump())
+        return incidents
 
     async def _monitor_loop(
         self,
@@ -445,10 +491,12 @@ class MonitoringEngine:
         else:
             videos = [v.original_video for v in src.videos[:max_videos]]
 
-        all_events: list[PotentialEvent] = []
+        all_events: list[dict[str, Any]] = []
         ordered_uris: list[str] = []
         seg_counter = 0
         total_estimate = min(src.segment_count, max_segments) or max_segments
+        uri_to_ov: dict[str, str] = {}
+        uri_to_caption: dict[str, str] = {}
 
         # Pipeline monitor step
         pipe = self.store.get_pipeline(source_id) or {"source_id": source_id, "steps": []}
@@ -500,6 +548,8 @@ class MonitoringEngine:
                     break
                 ctx.segment_index = idx
                 ordered_uris.append(seg.source_uri)
+                uri_to_ov[seg.source_uri] = seg.original_video
+                uri_to_caption[seg.source_uri] = seg.caption or ""
                 seg_counter += 1
 
                 # Update replay clock
@@ -535,36 +585,41 @@ class MonitoringEngine:
                     # Soft skip pure safe cooccur with weak score
                     if looks_safe_interaction(seg.caption or "") and score < 0.55:
                         # Still record as rejected candidate for proof of negatives
-                        rej = PotentialEvent(
-                            id=_eid(),
-                            source_id=source_id,
-                            objective_id=obj.id,
-                            segment=seg.source_uri,
-                            signals=signals
-                            + [
-                                Signal(
-                                    kind="rule",
-                                    name="safe_interaction",
-                                    value=True,
-                                    detail="safe cues in caption",
-                                )
+                        rej = {
+                            "id": _eid(),
+                            "source_id": source_id,
+                            "objective_id": obj.id,
+                            "segment": seg.source_uri,
+                            "original_video": seg.original_video,
+                            "signals": [
+                                *[
+                                    s.model_dump() if hasattr(s, "model_dump") else s
+                                    for s in signals
+                                ],
+                                {
+                                    "kind": "rule",
+                                    "name": "safe_interaction",
+                                    "value": True,
+                                    "detail": "safe cues in caption",
+                                },
                             ],
-                            rule_score=score,
-                            llm=LlmEval(
-                                is_event=False,
-                                confidence=0.8,
-                                reason="safe person–vehicle interaction (stationary / walking away)",
-                                evidence_quote="",
-                            ),
-                            status="rejected",
-                            t_start=seg.t_start,
-                            t_end=seg.t_end,
-                            start_segment=seg.source_uri,
-                            peak_segment=seg.source_uri,
-                            end_segment=seg.source_uri,
-                        )
+                            "rule_score": score,
+                            "llm": {
+                                "is_event": False,
+                                "confidence": 0.8,
+                                "reason": "safe person–vehicle interaction (stationary / walking away)",
+                                "evidence_quote": "",
+                            },
+                            "status": "rejected",
+                            "t_start": seg.t_start,
+                            "t_end": seg.t_end,
+                            "start_segment": seg.source_uri,
+                            "peak_segment": seg.source_uri,
+                            "end_segment": seg.source_uri,
+                            "caption": seg.caption or "",
+                        }
                         all_events.append(rej)
-                        self.store.put("event", rej.id, rej, source_id=source_id)
+                        self.store.put("event", rej["id"], rej, source_id=source_id)
                         continue
 
                     per_obj_cands[obj.id].append(
@@ -574,6 +629,7 @@ class MonitoringEngine:
                             "score": score,
                             "signals": signals,
                             "source_id": source_id,
+                            "original_video": seg.original_video,
                         }
                     )
 
@@ -591,11 +647,40 @@ class MonitoringEngine:
                     # merge within this video's ordered uris
                     evs = self._merge_events(evs, merge_gap, [s.source_uri for s in segs])
                     for ev in evs:
+                        # Ensure original_video + caption survive merge
+                        uri = ev.get("segment") or ""
+                        if not ev.get("original_video"):
+                            ev["original_video"] = uri_to_ov.get(uri) or ""
+                        if not ev.get("caption"):
+                            ev["caption"] = uri_to_caption.get(uri) or ""
                         all_events.append(ev)
-                        self.store.put("event", ev.id, ev, source_id=source_id)
+                        self.store.put("event", ev["id"], ev, source_id=source_id)
 
-        candidates = [e for e in all_events if e.status == "candidate"]
-        rejected = [e for e in all_events if e.status == "rejected"]
+        candidates = [e for e in all_events if e.get("status") == "candidate"]
+        rejected = [e for e in all_events if e.get("status") == "rejected"]
+
+        # P8: investigate accepted candidates → Incidents
+        incidents: list[dict[str, Any]] = []
+        if candidates:
+            # pipeline: investigate running
+            pipe0 = self.store.get_pipeline(source_id) or {"source_id": source_id, "steps": []}
+            steps0 = [s for s in (pipe0.get("steps") or []) if s.get("key") not in {"investigate", "incident"}]
+            steps0.append(
+                {
+                    "key": "investigate",
+                    "label": "Investigation",
+                    "status": "running",
+                    "summary": f"Investigating {min(len(candidates), INVESTIGATE_LIMIT)} candidates",
+                    "started_at": _now(),
+                }
+            )
+            self.store.put(
+                "pipeline",
+                source_id,
+                {"source_id": source_id, "steps": steps0},
+                source_id=source_id,
+            )
+            incidents = await self._investigate_candidates(source_id, candidates)
 
         # Pipeline done summary
         pipe = self.store.get_pipeline(source_id) or {"source_id": source_id, "steps": []}
@@ -610,27 +695,39 @@ class MonitoringEngine:
                         "ended_at": _now() if once else None,
                     }
                 )
+            elif s.get("key") == "investigate":
+                steps.append(
+                    {
+                        **s,
+                        "status": "done",
+                        "summary": f"{len(incidents)} incidents · {len(candidates) - len(incidents)} not promoted",
+                        "ended_at": _now(),
+                    }
+                )
             else:
                 steps.append(s)
-        if once:
-            steps = [
-                s
-                if s.get("key") != "detect"
-                else s
-                for s in steps
-            ]
-            # add detect step
-            steps = [s for s in steps if s.get("key") != "detect"]
-            steps.append(
-                {
-                    "key": "detect",
-                    "label": "Events detected",
-                    "status": "done",
-                    "summary": f"{len(candidates)} candidate events",
-                    "started_at": _now(),
-                    "ended_at": _now(),
-                }
-            )
+        # detect + incident steps
+        steps = [s for s in steps if s.get("key") not in {"detect", "incident"}]
+        steps.append(
+            {
+                "key": "detect",
+                "label": "Events detected",
+                "status": "done",
+                "summary": f"{len(candidates)} candidate events",
+                "started_at": _now(),
+                "ended_at": _now(),
+            }
+        )
+        steps.append(
+            {
+                "key": "incident",
+                "label": "Incidents",
+                "status": "done" if incidents else "pending",
+                "summary": f"{len(incidents)} incident{'s' if len(incidents) != 1 else ''}",
+                "started_at": _now(),
+                "ended_at": _now() if incidents else None,
+            }
+        )
         self.store.put(
             "pipeline",
             source_id,
@@ -641,9 +738,9 @@ class MonitoringEngine:
         if once:
             self.store.set_source_status(
                 source_id,
-                "configured",
+                "monitoring" if incidents else "configured",
                 replay={
-                    "active": False,
+                    "active": bool(incidents),
                     "speed": speed or 6,
                     "segment": seg_counter,
                     "total_segments": total_estimate,
@@ -658,8 +755,11 @@ class MonitoringEngine:
             "candidates": len(candidates),
             "rejected": len(rejected),
             "events": len(candidates),
-            "events_detail": [e.model_dump() for e in candidates[:20]],
-            "rejected_detail": [e.model_dump() for e in rejected[:10]],
+            "incidents": len(incidents),
+            "incident_ids": [i.get("id") for i in incidents],
+            "events_detail": candidates[:20],
+            "rejected_detail": rejected[:10],
+            "incidents_detail": incidents[:10],
         }
 
 
