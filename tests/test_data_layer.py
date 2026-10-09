@@ -47,6 +47,24 @@ def test_parse_run_seed_view():
     assert parse_run_seed_view("plain.mp4") == (None, None)
 
 
+def test_evidence_angle_fields_preserved():
+    """eb5cf00 contract: Evidence.role may be angle; camera_view is optional."""
+    from models import Evidence
+
+    ev = Evidence(
+        role="angle",
+        camera_view="ceiling_04",
+        segment="s3://x/seg.mp4",
+        t_start=0.0,
+        t_end=5.0,
+        caption="other view",
+        clip_url="api/clip?source=s3://x/seg.mp4",
+    )
+    d = ev.model_dump()
+    assert d["role"] == "angle"
+    assert d["camera_view"] == "ceiling_04"
+
+
 def test_object_counts_bad_json():
     from models import VideoSegment
 
@@ -102,6 +120,7 @@ def test_live_smoke():
 if __name__ == "__main__":
     test_from_vss_segment_mapping()
     test_parse_run_seed_view()
+    test_evidence_angle_fields_preserved()
     test_object_counts_bad_json()
     test_live_smoke()
     print("OK")

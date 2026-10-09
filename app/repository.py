@@ -15,6 +15,7 @@ from typing import Any, Optional
 
 from models import (
     DetectionSummary,
+    Evidence,
     VideoRef,
     VideoSegment,
     VideoSource,
@@ -309,21 +310,23 @@ class VideoRepository:
             if best is None:
                 # Fallback: nearest by start time
                 best = min(segs, key=lambda s: abs(s.t_start - t_start))
-            out.append(
-                {
-                    "role": "angle",
-                    "camera_view": view,
-                    "segment": best.source_uri,
-                    "t_start": best.t_start,
-                    "t_end": best.t_end,
-                    "caption": best.caption,
-                    "yolo": best.yolo.model_dump() if best.yolo else None,
-                    "clip_url": f"api/clip?source={best.source_uri}",
-                    "camera_id": best.camera_id or None,
-                    "original_video": ov,
-                    "run_seed": run_seed,
-                }
+            # Use Evidence contract from eb5cf00 (role="angle" + camera_view).
+            ev = Evidence(
+                role="angle",
+                camera_view=view,
+                segment=best.source_uri,
+                t_start=best.t_start,
+                t_end=best.t_end,
+                caption=best.caption,
+                yolo=best.yolo,
+                clip_url=f"api/clip?source={best.source_uri}",
+                camera_id=best.camera_id or None,
             )
+            row_out = ev.model_dump()
+            # Extra discovery metadata for Intel (not on Evidence schema).
+            row_out["original_video"] = ov
+            row_out["run_seed"] = run_seed
+            out.append(row_out)
         out.sort(key=lambda d: d.get("camera_view") or "")
         return out
 
@@ -353,17 +356,17 @@ class VideoRepository:
             except (TypeError, ValueError):
                 sim_f = None
             hits.append(
-                {
-                    "role": "related",
-                    "segment": seg.source_uri,
-                    "t_start": seg.t_start,
-                    "t_end": seg.t_end,
-                    "caption": seg.caption,
-                    "yolo": seg.yolo.model_dump() if seg.yolo else {"classes": {}},
-                    "clip_url": f"api/clip?source={seg.source_uri}",
-                    "camera_id": seg.camera_id or None,
-                    "similarity": sim_f,
-                }
+                Evidence(
+                    role="related",
+                    segment=seg.source_uri,
+                    t_start=seg.t_start,
+                    t_end=seg.t_end,
+                    caption=seg.caption,
+                    yolo=seg.yolo,
+                    clip_url=f"api/clip?source={seg.source_uri}",
+                    camera_id=seg.camera_id or None,
+                    similarity=sim_f,
+                ).model_dump()
             )
         return hits
 
