@@ -922,7 +922,7 @@ function uploadWithProgress(path, fd, onProgress) {
 function tagFormHTML(o) {
   const attrs = Object.entries(o).filter(([, v]) => v != null).map(([k, v]) => `data-${k}="${esc(v)}"`).join(' ');
   return `<form class="tagbar" data-tag-form ${attrs}>
-    <input name="note" maxlength="300" autocomplete="off" placeholder="Something happened here? Describe it, e.g. swimmer goes under and doesn't come up">
+    <input name="note" maxlength="300" autocomplete="off" placeholder="Something happened here? Describe what you saw">
     <button class="btn">Tag this moment</button></form>`;
 }
 function tagCheckHTML(c) {
