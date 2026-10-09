@@ -390,7 +390,8 @@
       return SOURCES.map(s => ({ id: s.id, camera_id: s.camera_id, label: s.label, location: s.location, capture_type: s.capture_type, segment_count: s.segment_count,
         status: configureAt[s.id] && since(configureAt[s.id]) < 7500 ? 'configuring' : s.status, classification: s.classification ? { domain: s.classification.domain, confidence: s.classification.confidence } : null,
         profile_summary: s.profile ? { title: s.profile.domain === 'warehouse' ? 'Warehouse person–vehicle safety' : s.profile.domain === 'traffic' ? 'Road person–vehicle safety' : 'Street & facility monitoring', objectives: s.profile.objectives.length, entities: s.classification.important_entities, mode: s.profile.mode } : null,
-        incident_counts: counts(s.id), replay: replay(s) }));
+        incident_counts: counts(s.id), replay: replay(s), segment_seconds: SEG,
+        reingest_status: latestJob[s.id] ? jobState(jobs[latestJob[s.id]]).status : null }));
     }
     if (r[0] === 'sources' && r[1]) {
       const src = SOURCES.find(s => s.id === decodeURIComponent(r[1]));
@@ -409,7 +410,7 @@
       if (r[2] === 'segments') return [];
       const job = latestJob[src.id] ? jobState(jobs[latestJob[src.id]]) : null;
       return Object.assign(clone({ id: src.id, camera_id: src.camera_id, label: src.label, location: src.location, capture_type: src.capture_type, segment_count: src.segment_count,
-        status: configureAt[src.id] && since(configureAt[src.id]) < 7500 ? 'configuring' : src.status, classification: src.classification || null, profile: src.profile || null }),
+        status: configureAt[src.id] && since(configureAt[src.id]) < 7500 ? 'configuring' : src.status, classification: src.classification || null, profile: src.profile || null, segment_seconds: SEG }),
         { pipeline: src.pipeline || pipeline(src), reingest: job ? clone(job) : null, evolution: { source_id: src.id, steps: evolution[src.id] || [] }, replay: replay(src),
           incidents: visibleIncidents().filter(i => i.source_id === src.id) });
     }

@@ -1,5 +1,5 @@
 'use strict';
-/* Sightline UI. Talks only to our backend's internal API (planning/ARCHITECTURE.md §5),
+/* Sightline UI. Talks only to our backend's internal API (planning/ARCHITECTURE.md §5, §5a),
    always relative to document.baseURI (set at runtime in index.html).
    ?mock=1 swaps the network for mock.js so the UI can be built without VAST access. */
 
@@ -16,6 +16,7 @@ const S = {
   feedReady: false,
   selected: null,
   route: { name: 'overview' },
+  ovTab: 'incidents',
   busy: false,
   offline: false,
   live: null,
@@ -38,6 +39,12 @@ function fmtT(v) {
   const d = new Date(v);
   return isNaN(d) ? String(v) : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
+/** Video timecode HH:MM:SS:FF (frames shown as 00; segments are seconds-accurate). */
+function fmtTC(v) {
+  if (v == null || isNaN(v)) return '--:--:--:--';
+  const s = Math.max(0, Math.floor(Number(v)));
+  return [Math.floor(s / 3600), Math.floor(s / 60) % 60, s % 60, 0].map(n => String(n).padStart(2, '0')).join(':');
+}
 function clock(iso) {
   const d = new Date(iso);
   return isNaN(d) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -49,6 +56,12 @@ function elapsed(fromIso, toIso) {
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
 }
 const shortSeg = uri => uri ? String(uri).split('/').filter(Boolean).slice(-2).join('/') : '';
+function camOf(ev) {
+  if (!ev) return '';
+  if (ev.camera_id) return ev.camera_id;
+  const parts = String(ev.segment || '').split('/').filter(Boolean);
+  return parts.length > 2 ? parts[parts.length - 2] : '';
+}
 
 /** Replace innerHTML only when it changed, so playing videos and scroll positions survive polling. */
 function setHTML(el, html) {
@@ -56,11 +69,10 @@ function setHTML(el, html) {
 }
 
 function toast(msg, kind = 'error') {
-  const box = $('#toast');
   const d = document.createElement('div');
   d.className = kind;
   d.textContent = msg;
-  box.appendChild(d);
+  $('#toast').appendChild(d);
   setTimeout(() => d.remove(), kind === 'error' ? 7000 : 3500);
 }
 
@@ -88,34 +100,28 @@ function clipSrc(ev) {
   return u ? new URL(u, document.baseURI).href : null;
 }
 
-// ---------------------------------------------------------------- shared renderers
-const SIGNAL = { critical: 'Danger', high: 'Warning', medium: 'Caution', low: 'Notice' };
-const ALERT_SVG = '<svg viewBox="0 0 14 12" aria-hidden="true"><path d="M7 .4 13.6 11.6H.4Z" fill="currentColor"/><path class="bang" d="M7 4.3v3.4M7 9.6v.1"/></svg>';
+// ---------------------------------------------------------------- building blocks
+/** A docked pane. `title` and `right` are trusted markup; callers escape data. */
+function pane(title, body, { right = '', cls = '', id = '', flush = false } = {}) {
+  return `<section class="pane ${cls}"><header class="pane-h"><span class="pt">${title}</span>${right ? `<span class="pr">${right}</span>` : ''}</header>
+    <div class="pane-b${flush ? ' flush' : ''}"${id ? ` id="${id}"` : ''}>${body}</div></section>`;
+}
+
+const SEV_LABEL = { critical: 'Critical', high: 'High', medium: 'Medium', low: 'Low' };
 function sevPill(sev) {
-  const k = SIGNAL[sev] ? sev : 'low';
-  return `<span class="sev ${k}" title="${esc(k)} severity">${k === 'low' ? '' : ALERT_SVG}${SIGNAL[k]}</span>`;
+  const k = SEV_LABEL[sev] ? sev : 'low';
+  return `<span class="sev ${k}"><i></i>${SEV_LABEL[k]}</span>`;
 }
-/** Cosmos captions with the FLAGS line Sightline asked for highlighted as evidence. */
+/** Cosmos captions, with the FLAGS line Sightline asked for highlighted as evidence. */
 function captionHTML(text) { return esc(text).replace(/(FLAGS:[^\n]*)/, '<mark>$1</mark>'); }
-function fmtTC(v) {
-  if (v == null || isNaN(v)) return '';
-  const s = Math.max(0, Math.round(Number(v)));
-  return [Math.floor(s / 3600), Math.floor(s / 60) % 60, s % 60].map(n => String(n).padStart(2, '0')).join(':');
-}
-function camOf(ev) {
-  if (!ev) return '';
-  if (ev.camera_id) return ev.camera_id;
-  const parts = String(ev.segment || '').split('/').filter(Boolean);
-  return parts.length > 2 ? parts[parts.length - 2] : '';
-}
 
 function player(ev, { badge = '', autoplay = false, overlay = '', controls = true, cam = '' } = {}) {
   const src = clipSrc(ev);
   const inner = src
     ? `<video src="${esc(src)}" preload="metadata" muted playsinline ${controls ? 'controls' : ''} ${autoplay ? 'autoplay loop' : ''}></video>`
-    : `<div class="ph"><div><div class="big">${MOCK ? 'Mock clip' : 'Clip unavailable'}</div><div class="small">${esc(shortSeg(ev && ev.segment))}</div></div></div>`;
+    : `<div class="ph"><div><div class="big">${MOCK ? 'Mock clip' : 'No clip'}</div><div>${esc(shortSeg(ev && ev.segment))}</div></div></div>`;
   const camId = cam || camOf(ev);
-  const osd = ev || badge ? `<div class="osd"><span>${camId ? 'CAM ' + esc(camId) : ''}</span><span>${badge ? `<span class="ev">● ${esc(badge)}</span> ` : ''}${ev && ev.t_start != null ? esc(fmtTC(ev.t_start)) : ''}</span></div>` : '';
+  const osd = ev || badge ? `<div class="osd"><span>${camId ? esc(camId) : ''}</span><span>${badge ? `<span class="ev">${esc(badge)}</span>` : ''}</span></div>` : '';
   return `<div class="player">${inner}${osd}${overlay ? `<div class="overlay">${overlay}</div>` : ''}</div>`;
 }
 
@@ -127,19 +133,19 @@ function yoloTags(y) {
 const STEP_LABELS = {
   classify: 'Scene classified',
   plan: 'Monitoring plan generated',
-  prompt: 'Specialized Cosmos prompt written',
+  prompt: 'Cosmos prompt written',
   reingest: 'Footage re-analyzed (VAST re-ingest)',
   monitor: 'Monitoring',
-  detect: 'Potential events evaluated',
+  detect: 'Candidates evaluated',
   investigate: 'Investigations',
   incident: 'Incidents raised',
 };
-const STEP_ICON = { done: '✓', running: '◐', failed: '✕', skipped: '–', pending: '' };
+const STEP_ICON = { done: '✓', running: '●', failed: '✕', skipped: '–', pending: '○' };
 
-function pipelineHTML(run, horizontal) {
+function pipelineHTML(run) {
   const steps = (run && run.steps) || [];
-  if (!steps.length) return `<div class="empty">Not configured yet. Sightline hasn't looked at this source.</div>`;
-  return `<div class="steps${horizontal ? ' h' : ''}">${steps.map(st => `
+  if (!steps.length) return `<div class="empty" style="padding:12px">Not configured yet.</div>`;
+  return `<div class="steps">${steps.map(st => `
     <div class="step ${esc(st.status)}">
       <span class="ic">${STEP_ICON[st.status] ?? ''}</span>
       <div><div class="sl">${esc(st.label || STEP_LABELS[st.key] || cap(st.key))}</div>
@@ -151,20 +157,49 @@ function pipelineHTML(run, horizontal) {
 
 function feedItem(inc, isNew) {
   const comps = ((inc.confidence && inc.confidence.components) || []).map(c => `${c.name}: ${pct(c.value)}`).join(' · ');
-  return `<div class="feed-item ${isNew ? 'new' : ''}" data-nav="/incident/${enc(inc.id)}">
-    <span>${sevPill(inc.severity)}</span>
-    <div><div class="ft">${esc(inc.title)}</div>
-      <div class="fs">${esc(sourceLabel(inc.source_id))} · video ${esc(fmtT(inc.peak_at ?? inc.started_at))}${inc.mode === 'rules_only' ? ' · rules-only' : ''}${inc.created_at ? ' · ' + esc(clock(inc.created_at)) : ''}</div></div>
-    <div class="fc" title="${esc('Confidence components: ' + comps)}"><b>${pct(inc.confidence && inc.confidence.value)}</b><br>${esc(inc.investigation && inc.investigation.verdict || '')}</div>
+  return `<div class="feed-item ${isNew ? 'new' : ''}" data-nav="/incident/${enc(inc.id)}" title="${esc(SEV_LABEL[inc.severity] || '')} · ${esc(comps)}">
+    <span class="sev-dot ${esc(inc.severity)}"></span>
+    <div style="min-width:0"><div class="ft">${esc(inc.title)}</div>
+      <div class="fs">${esc(inc.camera_id || sourceLabel(inc.source_id))} · ${esc(fmtTC(inc.peak_at ?? inc.started_at))}${inc.mode === 'rules_only' ? ' · rules-only' : ''}${inc.created_at ? ' · ' + esc(clock(inc.created_at)) : ''}</div></div>
+    <span class="fc">${pct(inc.confidence && inc.confidence.value)}</span>
   </div>`;
 }
 
 function sourceById(id) { return S.sources.find(s => s.id === id); }
 function sourceLabel(id) { const s = sourceById(id); return s ? (s.label || s.camera_id) : id; }
 function domainOf(src) { return src && src.classification ? src.classification.domain : null; }
+function sortIncidents(list) { return [...list].sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || ''))); }
 
-function sortIncidents(list) {
-  return [...list].sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+/** NLE-style timeline: footage track (processed vs pending), incident markers, playhead at the replay clock. */
+function timelineHTML(src, incs) {
+  if (!src) return '<div class="tl-foot">No camera selected.</div>';
+  const r = src.replay;
+  const total = (r && r.total_segments) || src.segment_count || 0;
+  if (!total) return '<div class="tl-foot">No indexed segments for this camera.</div>';
+  const segSec = src.segment_seconds || null;
+  const pos = r ? Math.min(1, (r.segment || 0) / total) : null;
+  const ticks = Array.from({ length: 9 }, (_, i) => {
+    const seg = Math.round(total * i / 8);
+    return `<span class="tl-tick" style="left:${(i * 12.5).toFixed(2)}%">${segSec ? esc(fmtTC(seg * segSec).slice(0, 8)) : 'seg ' + seg}</span>`;
+  }).join('');
+  const nClips = Math.min(28, total);
+  const clips = Array.from({ length: nClips }, (_, i) => {
+    const a = i / nClips, b = (i + 1) / nClips;
+    const done = pos != null && b <= pos;
+    return `<span class="tl-clip ${done ? 'done' : ''}" style="left:calc(${(a * 100).toFixed(2)}% + 1px);width:calc(${((b - a) * 100).toFixed(2)}% - 2px)"></span>`;
+  }).join('');
+  const marks = incs.filter(i => i.replay_pos != null).map(i =>
+    `<span class="tl-mark ${esc(i.severity)}" style="left:${(i.replay_pos * 100).toFixed(2)}%" data-nav="/incident/${enc(i.id)}" title="${esc(i.title)} · ${esc(SEV_LABEL[i.severity] || '')} · ${pct(i.confidence && i.confidence.value)}"></span>`).join('');
+  return `<div class="tl">
+      <div class="tl-labels"><div class="tl-l ruler-l">${segSec ? 'TC' : 'SEG'}</div><div class="tl-l">Footage</div><div class="tl-l">Incidents</div></div>
+      <div class="tl-lanes">
+        <div class="tl-ruler">${ticks}</div>
+        <div class="tl-lane">${clips}</div>
+        <div class="tl-lane">${marks}</div>
+        ${pos != null ? `<div class="playhead" style="left:${(pos * 100).toFixed(2)}%" title="Replay clock"></div>` : ''}
+      </div>
+    </div>
+    <div class="tl-foot">${r && r.active ? `Archive replay ${esc(r.speed || '')}× · segment ${esc(r.segment)}/${esc(total)} · each segment is evaluated as the playhead passes it` : 'Not monitoring. Start monitoring from the camera page.'}</div>`;
 }
 
 // ---------------------------------------------------------------- top bar + sidebar
@@ -173,10 +208,9 @@ function renderTop() {
   const monitoring = S.sources.filter(s => s.status === 'monitoring').length;
   const speed = st.replay && st.replay.speed;
   setHTML($('#monitor-state'), monitoring
-    ? `<span class="pulse"></span><span><b>MONITORING</b> ${monitoring} source${monitoring > 1 ? 's' : ''}</span>
-       <span class="chip" title="Indexed archive footage replayed in chronological order. This is not a live camera feed.">Archive replay${speed ? ' ' + esc(speed) + '×' : ''}</span>`
-    : `<span class="pulse off"></span><span>Idle. No source is being monitored.</span>`);
-
+    ? `<span class="rec"></span><span><b>Monitoring</b> ${monitoring} camera${monitoring > 1 ? 's' : ''}</span>
+       <span class="chip" title="Indexed archive footage replayed in chronological order. Not a live camera feed.">archive replay${speed ? ' ' + esc(speed) + '×' : ''}</span>`
+    : `<span class="rec off"></span><span>Idle</span>`);
   const chip = (name, ok, title, warn) => `<span class="chip ${ok == null ? '' : ok ? (warn ? 'warn' : 'ok') : 'bad'}" title="${esc(title)}"><span class="dot"></span>${name}</span>`;
   const gpu = st.gpu || {};
   const gpuOk = gpu.cosmos ? (gpu.cosmos.ok && (!gpu.yolo || gpu.yolo.ok)) : null;
@@ -184,48 +218,41 @@ function renderTop() {
   const state = st.state || {};
   let html = '';
   if (MOCK) html += `<span class="chip mock" title="UI is running on mock.js data, not the real backend">MOCK DATA</span>`;
-  if (state.data_origin === 'seed') html += `<span class="chip cached" title="Backend is serving a saved snapshot">Cached snapshot ${esc(clock(state.snapshot_at))}</span>`;
+  if (state.data_origin === 'seed') html += `<span class="chip cached" title="Backend is serving a saved snapshot">cached ${esc(clock(state.snapshot_at))}</span>`;
   html += chip('VSS', st.vss ? st.vss.ok : null, (st.vss && st.vss.detail) || 'VAST video search backend');
-  html += chip('GPU', gpuOk, 'Cosmos3-Reason, YOLO11, Embed1 endpoints on CoreWeave');
+  html += chip('GPU', gpuOk, 'Cosmos3-Reason, YOLO11, Embed1 on CoreWeave');
   html += chip('LLM', st.llm ? llm.ok : null, `W&B Inference${llm.model ? ': ' + llm.model : ''}${llm.mode === 'rules_only' ? ' (rules-only fallback active)' : ''}`, llm.mode === 'rules_only');
-  html += chip('STATE', st.state ? true : null, state.backend === 'vastdb' ? 'Sightline memory persisted in VastDB (schema "sightline")' : 'State is local only (not persisted to VastDB)', state.backend !== 'vastdb');
-  if (!st.vss && !MOCK) html += `<span class="chip bad" title="api/status unreachable"><span class="dot"></span>OFFLINE</span>`;
+  html += chip('VastDB', st.state ? state.backend === 'vastdb' : null, state.backend === 'vastdb' ? 'Sightline state persisted in VastDB (schema "sightline")' : 'State is local only');
   setHTML($('#health'), html);
+  const page = { overview: 'monitor', source: 'monitor', incident: 'monitor', search: 'search', new: 'new', live: 'live' }[S.route.name];
+  document.querySelectorAll('#pages button').forEach(b => b.classList.toggle('active', b.dataset.page === page));
 }
 
 function renderSidebar() {
-  const st = S.status || {};
-  const flags = st.flags || {};
   const sel = sourceById(S.selected);
   const activeId = S.route.name === 'source' ? S.route.id : S.selected;
-  const items = S.sources.map((src, idx) => {
+  const items = S.sources.map(src => {
     const c = src.incident_counts || {};
     const n = (c.critical || 0) + (c.high || 0) + (c.medium || 0) + (c.low || 0);
     const hot = (c.critical || 0) + (c.high || 0) > 0;
     const cl = src.classification;
     return `<div class="src ${src.id === activeId ? 'active' : ''}" data-nav="/source/${enc(src.id)}" title="${esc(src.status || '')}">
-      <span class="ch">CH${idx + 1}</span>
-      <div><div class="label">${esc(src.label || src.camera_id)}</div>
-        <div class="sub">${esc(src.camera_id)}<br>${cl ? esc(cap(cl.domain)) + ' ' + pct(cl.confidence) : 'not configured'}${src.status === 'monitoring' ? ' · watching' : ''}</div></div>
-      <span class="count ${hot ? 'hot' : ''}" title="Incidents raised">${n}</span>
+      <span class="thumb ${esc(src.status || '')}"></span>
+      <div style="min-width:0"><div class="label">${esc(src.label || src.camera_id)}</div>
+        <div class="sub">${cl ? esc(cap(cl.domain)) + ' ' + pct(cl.confidence) : 'not configured'}</div></div>
+      <span class="count ${hot ? 'hot' : ''}" title="Incidents raised">${n || ''}</span>
     </div>`;
   }).join('');
   const prof = sel && sel.profile_summary;
-  let profile = '<div class="empty small">No source selected</div>';
-  if (sel) {
-    profile = prof
-      ? `<div class="profile-box"><div class="ptitle">${esc(prof.title || cap(domainOf(sel)))}</div>
-          <div class="muted small">${esc(sel.label || sel.camera_id)} · ${esc(prof.objectives ?? 0)} objectives${prof.mode === 'rules_only' ? ' · rules-only' : ''}</div>
-          ${prof.entities && prof.entities.length ? `<div class="small" style="margin-top:8px">Watching:</div><ul>${prof.entities.map(e => `<li>${esc(e)}</li>`).join('')}</ul>` : ''}</div>`
-      : `<div class="profile-box muted small">${esc(sel.label || sel.camera_id)} has no monitoring profile yet.</div>`;
-  }
+  const profile = !sel ? '<div class="profile-box muted">No camera selected</div>'
+    : prof ? `<div class="profile-box"><div class="ptitle">${esc(prof.title || cap(domainOf(sel)))}</div>
+        <div class="muted small">${esc(prof.objectives ?? 0)} objectives${prof.mode === 'rules_only' ? ' · rules-only' : ''}</div>
+        ${prof.entities && prof.entities.length ? `<ul>${prof.entities.map(e => `<li>${esc(e)}</li>`).join('')}</ul>` : ''}</div>`
+    : `<div class="profile-box muted">No monitoring profile yet.</div>`;
   setHTML($('#sidebar'), `
-    <div class="side-title">Sources</div>
-    ${items || '<div class="empty small">No indexed sources found</div>'}
-    ${flags.upload || MOCK ? `<button class="side-link" data-nav="/new">Add new footage</button>` : ''}
-    ${flags.live || MOCK ? `<button class="side-link" data-nav="/live">Live camera</button>` : ''}
-    <button class="side-link" data-nav="/search">Search the archive</button>
-    <div class="side-title">Active profile</div>
+    <div class="side-h"><span>Cameras</span><span class="mono muted">${S.sources.length}</span></div>
+    ${items || '<div class="empty" style="padding:12px">No indexed cameras found</div>'}
+    <div class="side-h"><span>Active profile</span></div>
     ${profile}`);
 }
 
@@ -234,70 +261,73 @@ const VIEWS = {};
 
 VIEWS.overview = {
   mount(main) {
-    main.innerHTML = `
-      <div id="ov-stats"></div>
-      <div class="grid-3-2">
-        <div class="panel"><h2>Watching <span class="spacer"></span><span id="ov-tabs" class="btn-row"></span></h2>
-          <div id="ov-player"></div><div id="ov-replay"></div></div>
-        <div class="panel"><h2>Incidents <span class="spacer"></span><span class="muted" id="ov-feed-meta"></span></h2>
-          <div id="ov-feed" class="feed tall"></div></div>
-      </div>
-      <div class="panel"><h2>How Sightline handled this camera <span id="ov-pipe-src" class="muted"></span></h2>
-        <div id="ov-pipeline"></div></div>`;
+    main.innerHTML = `<div class="ws">
+      <section class="pane viewer-pane">
+        <header class="pane-h"><span class="pt">Viewer</span><span class="pr" id="ov-tabs"></span></header>
+        <div class="pane-b" id="ov-player"></div>
+        <div class="transport" id="ov-transport"></div>
+      </section>
+      <section class="pane">
+        <header class="pane-h"><div class="tabs">
+          <button data-action="ov-tab" data-tab="incidents">Incidents</button>
+          <button data-action="ov-tab" data-tab="agent">Agent</button></div>
+          <span class="pr" id="ov-feed-meta"></span></header>
+        <div class="pane-b flush" id="ov-side"></div>
+      </section>
+      <section class="pane timeline-pane">
+        <header class="pane-h"><span class="pt">Timeline</span><span class="pr" id="ov-stats"></span></header>
+        <div class="pane-b flush" id="ov-timeline"></div>
+      </section>
+    </div>`;
   },
   async update(main) {
     const src = sourceById(S.selected);
     const st = (S.status && S.status.stats) || null;
     const incidents = sortIncidents(S.incidents);
-    const severe = incidents.filter(i => i.severity === 'critical' || i.severity === 'high').length;
-    const configured = S.sources.filter(s => s.classification).length;
-    const fig = (v, l, t) => `<span title="${esc(t)}"><b>${esc(v)}</b>${esc(l)}</span>`;
-    setHTML($('#ov-stats', main), `<div class="figures">
-      ${fig(`${configured}/${S.sources.length}`, 'cameras configured themselves', 'Sources with a Sightline-generated classification and monitoring profile')}
-      ${st ? fig(st.candidates ?? '–', 'candidate moments evaluated', 'Segments that passed deterministic gates and were evaluated') : ''}
-      ${st ? fig(st.rejected ?? '–', 'rejected after investigation', 'Candidates the investigation judged unclear or false positive (kept for audit)') : ''}
-      ${fig(incidents.length, `incident${incidents.length === 1 ? '' : 's'} raised, ${severe} warning or danger`, 'Incidents that passed investigation')}
-    </div>`);
-
-    setHTML($('#ov-tabs', main), S.sources.filter(s => s.classification).map(s =>
-      `<button class="btn ${s.id === S.selected ? 'primary' : ''}" data-action="select-source" data-id="${esc(s.id)}">${esc(s.label || s.camera_id)}</button>`).join(''));
-
     const mine = incidents.filter(i => i.source_id === S.selected);
+    const configured = S.sources.filter(s => s.classification).length;
+
+    document.querySelectorAll('[data-action="ov-tab"]').forEach(b => b.classList.toggle('on', b.dataset.tab === S.ovTab));
+    setHTML($('#ov-tabs', main), `<span class="seg">${S.sources.filter(s => s.classification).map(s =>
+      `<button class="${s.id === S.selected ? 'on' : ''}" data-action="select-source" data-id="${esc(s.id)}">${esc(s.label || s.camera_id)}</button>`).join('')}</span>`);
+
     const latest = mine[0];
     const ev = latest && (latest.evidence || []).find(e => e.role === 'event');
     const replay = (src && src.replay) || null;
     if (latest && ev) {
       setHTML($('#ov-player', main), player(ev, {
         badge: 'LATEST INCIDENT', autoplay: true, cam: latest.camera_id,
-        overlay: `${sevPill(latest.severity)} <b>${esc(latest.title)}</b> <span class="muted">· video ${esc(fmtT(latest.peak_at ?? latest.started_at))} · ${pct(latest.confidence && latest.confidence.value)}</span>`,
+        overlay: `${sevPill(latest.severity)} <b style="margin-left:6px">${esc(latest.title)}</b> <span class="muted">· ${pct(latest.confidence && latest.confidence.value)}</span>`,
       }));
     } else {
       setHTML($('#ov-player', main), player(replay && replay.segment_uri ? { segment: replay.segment_uri } : null, {
         badge: replay && replay.active ? 'REPLAY' : '', cam: src && src.camera_id,
-        overlay: replay && replay.caption ? `<span class="muted">${esc(replay.caption)}</span>` : (src ? esc(src.label || src.camera_id) : 'No source'),
+        overlay: replay && replay.caption ? `<span class="muted">${esc(replay.caption)}</span>` : '',
       }));
     }
-    if (replay && replay.total_segments) {
-      const pos = Math.min(1, (replay.segment || 0) / replay.total_segments);
-      const marks = mine.filter(i => i.replay_pos != null).map(i => `<span class="mark" style="left:${(i.replay_pos * 100).toFixed(1)}%" title="${esc(i.title)}"></span>`).join('');
-      setHTML($('#ov-replay', main), `<div class="replay-bar" title="Indexed archive replayed in order; each segment is evaluated as the replay clock passes it">
-        <span>${replay.active ? 'Archive replay' : 'Paused'}${replay.speed ? ' · ' + esc(replay.speed) + '×' : ''}</span>
-        <div class="track"><div class="fill" style="width:${(pos * 100).toFixed(1)}%"></div>${marks}</div>
-        <span class="mono">${esc(replay.segment || 0)}/${esc(replay.total_segments)}</span></div>`);
-    } else setHTML($('#ov-replay', main), '');
-
-    setHTML($('#ov-pipe-src', main), src ? esc(src.label || src.camera_id) : '');
-    if (src) {
-      try { setHTML($('#ov-pipeline', main), pipelineHTML(await GET(`api/pipeline/${enc(src.id)}`), true)); }
-      catch (e) { setHTML($('#ov-pipeline', main), `<div class="empty">Pipeline unavailable (${esc(e.message)})</div>`); }
-    }
+    const segSec = src && src.segment_seconds;
+    setHTML($('#ov-transport', main), `<span>${esc(src ? src.camera_id : '')}</span>
+      <span class="tc" title="${segSec ? 'Replay position' : 'Replay position (segment length unknown)'}">${replay ? (segSec ? esc(fmtTC(replay.segment * segSec)) : 'SEG ' + esc(replay.segment)) : '--:--:--:--'}</span>
+      <span class="r">${replay && replay.active ? `${esc(replay.speed)}× · ${esc(replay.segment)}/${esc(replay.total_segments)}` : 'paused'}</span>`);
 
     const fresh = new Set();
     if (S.feedReady) incidents.forEach(i => { if (!S.seen.has(i.id)) fresh.add(i.id); });
     incidents.forEach(i => S.seen.add(i.id));
     S.feedReady = true;
     setHTML($('#ov-feed-meta', main), `${incidents.length} raised · 0 searches typed`);
-    setHTML($('#ov-feed', main), incidents.length ? incidents.map(i => feedItem(i, fresh.has(i.id))).join('') : '<div class="empty">No incidents yet.</div>');
+    if (S.ovTab === 'agent') {
+      try { setHTML($('#ov-side', main), src ? pipelineHTML(await GET(`api/pipeline/${enc(src.id)}`)) : ''); }
+      catch (e) { setHTML($('#ov-side', main), `<div class="empty" style="padding:12px">Pipeline unavailable (${esc(e.message)})</div>`); }
+    } else {
+      setHTML($('#ov-side', main), incidents.length ? `<div class="feed">${incidents.map(i => feedItem(i, fresh.has(i.id))).join('')}</div>` : '<div class="empty" style="padding:12px">No incidents yet.</div>');
+    }
+
+    setHTML($('#ov-stats', main), `<span class="figures">
+      <span title="Cameras with a Sightline-generated classification and monitoring profile"><b>${configured}/${S.sources.length}</b>self-configured</span>
+      ${st ? `<span title="Segments that passed deterministic gates and were evaluated"><b>${esc(st.candidates ?? '–')}</b>evaluated</span>
+      <span title="Candidates the investigation judged unclear or false (kept for audit)"><b>${esc(st.rejected ?? '–')}</b>rejected</span>` : ''}
+      <span><b>${incidents.length}</b>incidents</span></span>`);
+    setHTML($('#ov-timeline', main), timelineHTML(src, mine));
   },
 };
 
@@ -329,115 +359,122 @@ function detectorWords(d) {
 const REINGEST_STAGES = ['preparing', 'reingesting', 'indexing', 'verifying', 'ready'];
 
 function reingestHTML(src, job) {
-  if (!src.profile) return `<div class="empty">Configure the source first. Sightline needs a plan before it can write a prompt.</div>`;
+  if (!src.profile) return `<div class="empty">Configure the camera first. Sightline needs a plan before it can write a prompt.</div>`;
   if (!job) {
-    return `<p class="muted small">Sightline can re-run VAST's pipeline (YOLO → Cosmos → Embed → VastDB) on this footage using <b>its own prompt</b>. Planning is autonomous; execution waits for your approval because re-ingest rewrites the shared index.</p>
+    return `<p class="muted" style="margin-top:0">Re-runs VAST's pipeline (YOLO → Cosmos → Embed → VastDB) on a chunk of this footage with Sightline's prompt. Sightline picks the target; you approve the run, because re-ingest rewrites the shared index.</p>
       <button class="btn primary" data-action="plan-reingest" data-id="${esc(src.id)}">Plan re-analysis</button>`;
   }
   if (job.status === 'planned') {
     return `<div class="plan-card">
-        <div><b>Sightline's plan</b>: re-analyze <span class="mono">${esc(job.filename || shortSeg(job.original_video))}</span></div>
-        <div class="small muted" style="margin:6px 0">${esc(job.chunk_count)} chunk · ${esc(job.clips ?? '?')} clips · ETA ${esc(job.eta || 'a few minutes')} · prompt ${esc(job.prompt && job.prompt.chars)}/800 chars</div>
-        ${job.reason ? `<div class="small">${esc(job.reason)}</div>` : ''}
-      </div>
-      <div class="btn-row" style="margin-top:10px"><button class="btn go" data-action="approve-reingest" data-job="${esc(job.id)}">Approve &amp; start re-ingest</button></div>`;
+        <div class="mono small" style="margin-bottom:6px">${esc(job.filename || shortSeg(job.original_video))}</div>
+        <div class="small muted">${esc(job.chunk_count)} chunk · ${esc(job.clips ?? '?')} clips · ETA ${esc(job.eta || 'a few minutes')} · prompt ${esc(job.prompt && job.prompt.chars)}/800</div>
+        ${job.reason ? `<div class="small" style="margin-top:8px">${esc(job.reason)}</div>` : ''}
+        <div class="btn-row" style="margin-top:10px"><button class="btn primary" data-action="approve-reingest" data-job="${esc(job.id)}">Approve and start re-ingest</button></div>
+      </div>`;
   }
   const idx = REINGEST_STAGES.indexOf(job.status);
   const failed = job.status === 'failed';
   const failedAt = failed ? Math.max(0, REINGEST_STAGES.indexOf(job.failed_stage || 'reingesting')) : -1;
   const pr = job.progress || {};
   const frac = pr.total_segments ? pr.indexed_segments / pr.total_segments : (job.status === 'ready' ? 1 : 0);
-  return `<div class="stepper">${REINGEST_STAGES.map((s, i) => {
-      let c = '';
-      if (failed) c = i < failedAt ? 'done' : i === failedAt ? 'failed' : '';
-      else c = i < idx ? 'done' : i === idx ? (s === 'ready' ? 'done' : 'current') : '';
-      return `<div class="st ${c}">${esc(cap(s))}</div>`;
-    }).join('')}</div>
-    <div class="progress"><i style="width:${(frac * 100).toFixed(0)}%"></i></div>
-    <div class="small muted" title="Progress reported by VAST's re-ingest API; never estimated by Sightline">
-      ${esc(pr.completed_chunks ?? 0)}/${esc(pr.total_chunks ?? job.chunk_count ?? 1)} chunks · ${esc(pr.indexed_segments ?? 0)}/${esc(pr.total_segments ?? job.clips ?? '?')} clips
-      ${job.started_at ? ' · ' + esc(elapsed(job.started_at, job.finished_at)) : ''} · <span class="mono">${esc(job.filename || shortSeg(job.original_video))}</span></div>
-    ${job.verify ? `<div class="callout" style="margin-top:12px">Verified: captions changed in ${esc(job.verify.changed)}/${esc(job.verify.total)} segments; ${esc(job.verify.with_terms ?? 0)} mention objective-specific details.</div>` : ''}
-    ${failed ? `<div class="callout warn" style="margin-top:10px">Failed: ${esc(job.error || 'unknown error')}. Monitoring continues on the original captions.</div>` : ''}`;
+  const statusCls = failed ? 'failed' : job.status === 'ready' ? 'ready' : 'running';
+  return `<div class="rq">
+      <div class="rq-head"><span class="f">${esc(job.filename || shortSeg(job.original_video))}</span><span class="rq-status ${statusCls}">${esc(cap(job.status))}</span></div>
+      <div class="rq-body">
+        <div class="stepper">${REINGEST_STAGES.map((s, i) => {
+          let c = '';
+          if (failed) c = i < failedAt ? 'done' : i === failedAt ? 'failed' : '';
+          else c = i < idx ? 'done' : i === idx ? (s === 'ready' ? 'done' : 'current') : '';
+          return `<div class="st ${c}">${esc(cap(s))}</div>`;
+        }).join('')}</div>
+        <div class="progress"><i style="width:${(frac * 100).toFixed(0)}%"></i></div>
+        <div class="small muted mono" title="Progress reported by VAST's re-ingest API, never estimated">
+          ${esc(pr.completed_chunks ?? 0)}/${esc(pr.total_chunks ?? job.chunk_count ?? 1)} chunks · ${esc(pr.indexed_segments ?? 0)}/${esc(pr.total_segments ?? job.clips ?? '?')} clips${job.started_at ? ' · ' + esc(elapsed(job.started_at, job.finished_at)) : ''}</div>
+        ${job.verify ? `<div class="callout" style="margin-top:8px">Verified: captions changed in ${esc(job.verify.changed)}/${esc(job.verify.total)} segments; ${esc(job.verify.with_terms ?? 0)} mention objective-specific details.</div>` : ''}
+        ${failed ? `<div class="callout warn" style="margin-top:8px">Failed: ${esc(job.error || 'unknown error')}. Monitoring continues on the original captions.</div>` : ''}
+      </div></div>`;
 }
 
-const EVO_LABELS = { generic: 'Generic understanding', objective: 'Monitoring objective', prompt: "Sightline's prompt", reanalyzed: 'Re-analyzed by Cosmos', event: 'Operational event' };
+const EVO_LABELS = { generic: ['Original caption', 'v1'], objective: ['Objective', ''], prompt: ["Sightline's prompt", ''], reanalyzed: ['Re-analyzed caption', 'v2'], event: ['Incident', ''] };
 function evolutionHTML(evo) {
   const steps = (evo && evo.steps) || [];
-  if (!steps.length) return `<div class="empty">No re-analysis yet. After an approved re-ingest, this shows how Sightline changed what the index knows.</div>`;
-  return `<div class="evo">${steps.map(s => `<div class="card ${s.stage === 'event' ? 'event' : ''}" ${s.stage === 'event' && s.ref ? `data-nav="/incident/${enc(s.ref)}" style="cursor:pointer"` : ''}>
-      <div class="k">${esc(EVO_LABELS[s.stage] || cap(s.stage))}</div>
-      <div class="${s.stage === 'prompt' ? 'mono small' : ''}">${s.stage === 'reanalyzed' ? captionHTML(s.text) : esc(s.text)}</div></div>`).join('')}</div>`;
+  if (!steps.length) return `<div class="empty">No re-analysis yet. After an approved re-ingest, this shows how the index's description of the footage changed.</div>`;
+  return `<div class="evo">${steps.map(s => {
+    const [label, ver] = EVO_LABELS[s.stage] || [cap(s.stage), ''];
+    return `<div class="card ${s.stage === 'event' ? 'event' : ''}" ${s.stage === 'event' && s.ref ? `data-nav="/incident/${enc(s.ref)}" style="cursor:pointer"` : ''}>
+      <div class="k"><span>${esc(label)}</span><span class="v">${esc(ver)}</span></div>
+      <div class="${s.stage === 'prompt' ? 'mono small' : ''}">${s.stage === 'reanalyzed' ? captionHTML(s.text) : esc(s.text)}</div></div>`;
+  }).join('')}</div>`;
 }
 
 VIEWS.source = {
   mount(main) {
-    main.innerHTML = `<div id="sv-head"></div>
-      <div class="grid2">
-        <div class="panel"><h2>How Sightline configured this source</h2><div id="sv-config"></div></div>
-        <div class="panel"><h2>Autonomous pipeline</h2><div id="sv-pipeline"></div></div>
+    main.innerHTML = `<div class="stack">
+      <div id="sv-head"></div>
+      <div class="cols2">
+        ${pane('Environment', '', { id: 'sv-config' })}
+        ${pane('Agent pipeline', '', { id: 'sv-pipeline', flush: true })}
       </div>
-      <div class="panel"><h2>Monitoring plan <span class="spacer"></span><span class="muted small">generated, not hand-written</span></h2><div id="sv-plan"></div></div>
-      <div class="grid2">
-        <div class="panel"><h2>Specialized Cosmos prompt</h2><div id="sv-prompt"></div></div>
-        <div class="panel"><h2>Re-analysis (VAST re-ingest)</h2><div id="sv-reingest"></div></div>
+      ${pane('Monitoring plan', '', { id: 'sv-plan', flush: true, right: 'generated by Sightline, not hand-written' })}
+      <div class="cols2">
+        ${pane('Cosmos prompt', '', { id: 'sv-prompt' })}
+        ${pane('Render queue: VAST re-ingest', '', { id: 'sv-reingest' })}
       </div>
-      <div class="panel"><h2>Analysis evolution</h2><div id="sv-evo"></div></div>
-      <div class="panel"><h2>Incidents from this source</h2><div id="sv-incidents" class="feed"></div></div>`;
+      ${pane('Analysis versions', '', { id: 'sv-evo' })}
+      ${pane('Incidents', '', { id: 'sv-incidents', flush: true })}
+    </div>`;
   },
   async update(main) {
     const id = S.route.id;
     S.selected = id;
     let d;
     try { d = await GET(`api/sources/${enc(id)}`); }
-    catch (e) { setHTML($('#sv-head', main), `<div class="panel">Source unavailable: ${esc(e.message)}</div>`); return; }
+    catch (e) { setHTML($('#sv-head', main), `<div class="page-h">Camera unavailable: ${esc(e.message)}</div>`); return; }
     const cl = d.classification, pf = d.profile;
     const monitoring = d.status === 'monitoring';
-    setHTML($('#sv-head', main), `<div class="page-head">
-      <div class="grow"><h1>${esc(d.label || d.camera_id)}</h1>
-        <div class="meta">${esc(d.camera_id)} · ${esc(d.location || '–')} · ${esc(d.capture_type || '–')} · ${esc(d.segment_count ?? '?')} indexed segments · status <b>${esc(d.status)}</b></div>
-        <div style="margin-top:8px">${cl ? `<span class="tag accent" title="Sightline's environment classification">${esc(cap(cl.domain))} · ${pct(cl.confidence)}</span>` : ''}
-          ${cl && cl.mode === 'rules_only' ? '<span class="tag warn">rules-only (LLM unavailable)</span>' : ''}
-          ${cl && cl.camera_type ? `<span class="tag">${esc(cl.camera_type)} camera</span>` : ''}</div></div>
+    setHTML($('#sv-head', main), `<div class="page-h">
+      <div class="grow"><h1>${esc(d.label || d.camera_id)}
+          ${cl ? `<span class="tag accent" title="Sightline's environment classification">${esc(cap(cl.domain))} ${pct(cl.confidence)}</span>` : ''}
+          ${cl && cl.mode === 'rules_only' ? '<span class="tag warn">rules-only</span>' : ''}</h1>
+        <div class="meta">${esc(d.camera_id)} · ${esc(d.location || '–')} · ${esc(d.capture_type || '–')} · ${esc(d.segment_count ?? '?')} segments · ${cl && cl.camera_type ? esc(cl.camera_type) + ' camera · ' : ''}${esc(d.status)}</div></div>
       <div class="btn-row">
-        <button class="btn" data-action="configure" data-id="${esc(d.id)}">${cl ? 'Re-run self-configuration' : 'Let Sightline configure this source'}</button>
+        <button class="btn" data-action="configure" data-id="${esc(d.id)}">${cl ? 'Re-run self-configuration' : 'Configure this camera'}</button>
         ${pf ? (monitoring
           ? `<button class="btn danger" data-action="monitor-stop" data-id="${esc(d.id)}">Stop monitoring</button>`
           : `<button class="btn primary" data-action="monitor-start" data-id="${esc(d.id)}">Start monitoring</button>`) : ''}
       </div></div>`);
 
     setHTML($('#sv-config', main), cl ? `
-      <div style="margin-bottom:10px">${esc(cl.description || '')}</div>
-      <div class="small muted" style="margin-bottom:6px">Why Sightline thinks so:</div>
-      <ul class="evidence-list">${(cl.evidence || []).map(e => `<li><span class="tag">${esc(e.source)}</span><span><b>${esc(e.signal)}</b> <span class="muted">${esc(e.supports || '')}</span></span></li>`).join('')}</ul>
+      <div style="margin-bottom:8px">${esc(cl.description || '')}</div>
+      <ul class="evidence-list">${(cl.evidence || []).map(e => `<li><span class="tag">${esc(e.source)}</span><span>${esc(e.signal)} <span class="muted">${esc(e.supports || '')}</span></span></li>`).join('')}</ul>
       ${cl.important_entities && cl.important_entities.length ? `<div style="margin-top:10px">${cl.important_entities.map(e => `<span class="tag accent">${esc(e)}</span>`).join('')}</div>` : ''}`
-      : `<div class="empty">Not configured. Click “Let Sightline configure this source”.</div>`);
+      : `<div class="empty">Not configured. Sightline hasn't looked at this camera yet.</div>`);
 
     setHTML($('#sv-pipeline', main), pipelineHTML(d.pipeline));
 
     setHTML($('#sv-plan', main), pf ? `
-      <table class="obj"><thead><tr><th>Severity</th><th>Objective</th><th>Detects when</th><th>Probe</th></tr></thead><tbody>
+      <table class="obj"><thead><tr><th style="width:96px">Severity</th><th>Objective</th><th>Detects when</th><th style="width:24%">Search probe</th></tr></thead><tbody>
       ${(pf.objectives || []).map(o => `<tr><td>${sevPill(o.severity)}</td>
-        <td><b>${esc(o.name)}</b><div class="od">${esc(o.description || '')}</div>${o.rationale ? `<div class="od" style="margin-top:4px">Why: ${esc(o.rationale)}</div>` : ''}</td>
+        <td><div>${esc(o.name)}</div><div class="od">${esc(o.description || '')}</div>${o.rationale ? `<div class="od muted" style="margin-top:3px">${esc(o.rationale)}</div>` : ''}</td>
         <td class="od">${esc(detectorWords(o.detector))}</td>
-        <td class="od">${(o.semantic_probes || []).map(q => `“${esc(q)}”`).join('<br>')}</td></tr>`).join('')}
-      </tbody></table>
-      ${pf.dropped && pf.dropped.length ? `<div class="callout warn" style="margin-top:12px"><b>Not applicable here</b>${pf.dropped.map(x => `<div class="small">${esc(x.name || x.id)}: ${esc(x.reason)}</div>`).join('')}</div>` : ''}`
-      : `<div class="empty">No plan yet.</div>`);
+        <td class="od mono">${(o.semantic_probes || []).map(q => esc(q)).join('<br>')}</td></tr>`).join('')}
+      ${(pf.dropped || []).map(x => `<tr><td><span class="sev low"><i></i>N/A</span></td><td><div class="muted">${esc(x.name || x.id)}</div></td><td class="od" colspan="2">Dropped: ${esc(x.reason)}</td></tr>`).join('')}
+      </tbody></table>` : `<div class="empty" style="padding:12px">No plan yet.</div>`);
 
     const pr = pf && pf.generated_prompt;
+    const chars = pr ? (pr.chars ?? (pr.text || '').length) : 0;
     setHTML($('#sv-prompt', main), pr ? `
-      <div class="prompt-box">${esc(pr.text)}</div>
-      <div class="meter"><span>${esc(pr.chars ?? (pr.text || '').length)}/800 chars</span><div class="track"><i style="width:${Math.min(100, ((pr.chars ?? (pr.text || '').length) / 8)).toFixed(0)}%"></i></div>
-        ${pr.template_fallback ? '<span class="tag warn">template fallback</span>' : '<span class="tag accent">written by Sightline</span>'}</div>
-      ${pf.information_gaps && pf.information_gaps.length ? `<div class="small muted" style="margin-top:12px">Information gaps this prompt closes:</div><ul class="small">${pf.information_gaps.map(g => `<li>${esc(g)}</li>`).join('')}</ul>` : ''}
-      ${pr.covers && pr.covers.length ? `<div>${pr.covers.map(c => `<span class="tag">${esc(c)}</span>`).join('')}</div>` : ''}`
-      : `<div class="empty">No prompt generated yet.</div>`);
+      <div class="editor"><pre class="prompt-box">${esc(pr.text)}</pre>
+        <div class="editor-status"><span class="${chars <= 800 ? 'ok' : 'warn'}">${esc(chars)}/800</span>
+          <span>${pr.template_fallback ? 'template fallback' : 'written by Sightline'}</span>
+          <span>${esc((pr.covers || []).length)} objectives covered</span></div></div>
+      ${pf.information_gaps && pf.information_gaps.length ? `<div class="small muted" style="margin:10px 0 4px">Closes these gaps in the current captions:</div><ul class="small" style="margin:0;padding-left:18px">${pf.information_gaps.map(g => `<li>${esc(g)}</li>`).join('')}</ul>` : ''}`
+      : `<div class="empty">No prompt generated. The existing captions already cover this camera's objectives.</div>`);
 
     setHTML($('#sv-reingest', main), reingestHTML(d, d.reingest));
     setHTML($('#sv-evo', main), evolutionHTML(d.evolution));
     const incs = sortIncidents(d.incidents || S.incidents.filter(i => i.source_id === id));
-    setHTML($('#sv-incidents', main), incs.length ? incs.map(i => feedItem(i, false)).join('') : '<div class="empty">No incidents from this source yet.</div>');
+    setHTML($('#sv-incidents', main), incs.length ? `<div class="feed">${incs.map(i => feedItem(i, false)).join('')}</div>` : '<div class="empty" style="padding:12px">No incidents from this camera yet.</div>');
   },
 };
 
@@ -445,70 +482,70 @@ VIEWS.incident = {
   async mount(main) {
     let inc;
     try { inc = await GET(`api/incidents/${enc(S.route.id)}`); }
-    catch (e) { main.innerHTML = `<div class="panel">Incident unavailable: ${esc(e.message)}</div>`; return; }
+    catch (e) { main.innerHTML = `<div class="page-h">Incident unavailable: ${esc(e.message)}</div>`; return; }
     S.selected = inc.source_id;
     const inv = inc.investigation || {};
     const evs = inc.evidence || [];
     const before = evs.filter(e => e.role === 'before');
-    const pick = { BEFORE: before[before.length - 1], EVENT: evs.find(e => e.role === 'event'), AFTER: evs.find(e => e.role === 'after') };
+    const pick = { Before: before[before.length - 1], Event: evs.find(e => e.role === 'event'), After: evs.find(e => e.role === 'after') };
     const conf = inc.confidence || {};
     const probe = inc.search_hint || inc.title;
-    const trip = (role, ev) => `<div class="trip ${role === 'EVENT' ? 'event' : ''}" data-seg="${esc(ev ? ev.segment : '')}">
-      <div class="role"><span>${role}</span><span class="mono">${ev ? esc(fmtT(ev.t_start)) + '–' + esc(fmtT(ev.t_end)) : ''}</span></div>
-      ${ev ? player(ev, { autoplay: role === 'EVENT', badge: role === 'EVENT' ? 'EVENT' : '', cam: inc.camera_id }) : `<div class="player"><div class="ph"><div class="big">No ${role.toLowerCase()} segment</div></div></div>`}
-      ${ev ? `<div class="caption" data-action="toggle-caption" title="Cosmos description (click to expand)">${captionHTML(ev.caption)}</div><div style="margin-top:6px">${yoloTags(ev.yolo)}</div>` : ''}
+    const trip = (role, ev) => `<div class="trip ${role === 'Event' ? 'event' : ''}" data-seg="${esc(ev ? ev.segment : '')}">
+      <div class="role"><span>${role}</span><span class="mono">${ev ? esc(fmtTC(ev.t_start)) + ' – ' + esc(fmtTC(ev.t_end)) : ''}</span></div>
+      ${ev ? player(ev, { autoplay: role === 'Event', cam: inc.camera_id }) : `<div class="player"><div class="ph"><div class="big">No ${role.toLowerCase()} segment</div></div></div>`}
+      ${ev ? `<div class="meta-b"><div class="caption" data-action="toggle-caption" title="Cosmos description (click to expand)">${captionHTML(ev.caption)}</div><div style="margin-top:6px">${yoloTags(ev.yolo)}</div></div>` : ''}
     </div>`;
+    const kv = (k, v) => `<dt>${k}</dt><dd>${v}</dd>`;
 
-    main.innerHTML = `
-      <button class="back" data-nav="/source/${enc(inc.source_id)}">← ${esc(sourceLabel(inc.source_id))}</button>
-      <div class="page-head">
-        <div class="grow">
-          <div>${sevPill(inc.severity)} <span class="tag">${esc(cap(inc.domain))}</span> <span class="tag">${esc(cap(inv.verdict || ''))}</span>${inc.mode === 'rules_only' ? '<span class="tag warn">rules-only</span>' : ''}</div>
-          <h1 style="margin-top:8px">${esc(inc.title)}</h1>
-          <div class="meta">${esc(inc.camera_id || '')} · ${esc(inc.location || '')} · video ${esc(fmtT(inc.started_at))}–${esc(fmtT(inc.ended_at))} (peak ${esc(fmtT(inc.peak_at))}) · raised automatically ${esc(clock(inc.created_at))}</div>
-        </div>
-        <div class="conf-box" data-action="toggle-conf" title="Click for the breakdown">
-          <div class="conf-big">${pct(conf.value)}</div><div class="conf-label">confidence: how it's computed</div>
-        </div>
+    main.innerHTML = `<div class="stack">
+      <div class="page-h">
+        <button class="back" data-nav="/source/${enc(inc.source_id)}">← ${esc(sourceLabel(inc.source_id))}</button>
+        <div class="grow"><h1>${esc(inc.title)} ${sevPill(inc.severity)}${inc.mode === 'rules_only' ? '<span class="tag warn">rules-only</span>' : ''}</h1>
+          <div class="meta">${esc(inc.camera_id || '')} · in ${esc(fmtTC(inc.started_at))} · peak ${esc(fmtTC(inc.peak_at))} · out ${esc(fmtTC(inc.ended_at))} · raised automatically ${esc(clock(inc.created_at))}</div></div>
+        <div class="conf-box" title="Weighted combination of the components in the Confidence pane">
+          <div class="conf-big">${pct(conf.value)}</div><div class="conf-label">confidence · ${esc(inv.verdict || '')}</div></div>
       </div>
-      <div class="panel components" id="conf-components"><h2>Why this confidence</h2>
-        ${(conf.components || []).map(c => `<div class="comp"><span>${esc(c.name)}</span><div class="bar"><i style="width:${pct(c.value)}"></i></div><span class="mono">${pct(c.value)}</span>
-          <div class="ex">${esc(c.explanation || '')}${c.weight != null ? ` · weight ${esc(c.weight)}` : ''}</div></div>`).join('') || '<div class="empty">No breakdown</div>'}
-      </div>
-      <div class="panel"><h2>Evidence</h2><div class="triptych">${trip('BEFORE', pick.BEFORE)}${trip('EVENT', pick.EVENT)}${trip('AFTER', pick.AFTER)}</div></div>
-      <div class="grid-3-2">
-        <div>
-          <div class="panel"><h2>Timeline</h2>
-            <ul class="timeline">${(inv.timeline || []).map(t => `<li class="${t.segment && t.segment === inv.peak_segment ? 'peak' : ''}" data-action="play-seg" data-seg="${esc(t.segment || '')}"><span class="tt">${esc(fmtT(t.t))}</span>${esc(t.text)}</li>`).join('') || '<li>No timeline</li>'}</ul></div>
-          <div class="panel"><h2>Why Sightline flagged this</h2><div>${esc(inv.why_flagged || '')}</div>
-            ${inc.summary ? `<div class="muted" style="margin-top:10px">${esc(inc.summary)}</div>` : ''}</div>
-          <div class="panel"><h2>Investigation</h2>
-            ${(inv.answers || []).map(a => `<div class="qa"><div class="q">${esc(a.question)}</div><div class="a">${esc(a.answer)}</div></div>`).join('') || '<div class="empty">No questions recorded</div>'}
-            ${inv.counter_evidence ? `<div class="callout warn" style="margin-top:10px"><b>Counter-evidence considered:</b> ${esc(inv.counter_evidence)}</div>` : ''}
-            ${inv.second_look ? `<div class="callout" style="margin-top:10px"><b>Cosmos second look: ${esc(inv.second_look.verdict)}</b>. ${esc(inv.second_look.text || '')}</div>` : ''}
-          </div>
+      <div class="multicam">${trip('Before', pick.Before)}${trip('Event', pick.Event)}${trip('After', pick.After)}</div>
+      <div class="cols-3-2">
+        <div class="stack">
+          ${pane('Markers', `<ul class="timeline">${(inv.timeline || []).map(t => `<li class="${t.segment && t.segment === inv.peak_segment ? 'peak' : ''}" data-action="play-seg" data-seg="${esc(t.segment || '')}"><span class="tt">${esc(fmtTC(t.t))}</span><span>${esc(t.text)}</span></li>`).join('') || '<li><span></span><span>No markers</span></li>'}</ul>`)}
+          ${pane('Why Sightline flagged this', `<div>${esc(inv.why_flagged || '')}</div>${inc.summary ? `<div class="muted" style="margin-top:8px">${esc(inc.summary)}</div>` : ''}`)}
+          ${pane('Investigation', `${(inv.answers || []).map(a => `<div class="qa"><div class="q">${esc(a.question)}</div><div class="a">${esc(a.answer)}</div></div>`).join('') || '<div class="empty">No questions recorded</div>'}
+            ${inv.counter_evidence ? `<div class="callout warn" style="margin-top:10px">Counter-evidence considered: ${esc(inv.counter_evidence)}</div>` : ''}
+            ${inv.second_look ? `<div class="callout" style="margin-top:8px">Cosmos second look: <b>${esc(inv.second_look.verdict)}</b>. ${esc(inv.second_look.text || '')}</div>` : ''}`)}
         </div>
-        <div>
-          <div class="panel"><h2>Recommended action</h2><div class="callout action">${esc(inc.recommended_action || 'Review the evidence.')}</div></div>
-          <div class="panel"><h2>Entities</h2>${(inc.entities || inv.entities || []).map(e => `<span class="tag accent">${esc(e)}</span>`).join('') || '<span class="muted">–</span>'}</div>
-          <div class="panel"><h2>Related moments <span class="spacer"></span><button class="btn" data-nav="/search?q=${enc(probe)}&source=${enc(inc.source_id)}">Find similar</button></h2>
-            <div class="related">${(inv.related || []).map(r => `<div class="rel">${player(r, { controls: true })}
-              <div class="muted">${esc(r.camera_id || '')} · ${esc(fmtT(r.t_start))}${r.similarity != null ? ' · ' + pct(r.similarity) : ''}</div><div>${esc(String(r.caption || '').slice(0, 140))}</div></div>`).join('') || '<div class="empty">None found</div>'}</div></div>
+        <div class="stack">
+          ${pane('Inspector', `<dl class="kv">
+            ${kv('Severity', sevPill(inc.severity))}
+            ${kv('Verdict', esc(cap(inv.verdict || '–')))}
+            ${kv('Domain', esc(cap(inc.domain)))}
+            ${kv('Camera', esc(inc.camera_id || '–'))}
+            ${kv('Location', esc(inc.location || '–'))}
+            ${kv('Objective', esc(inc.objective_id || '–'))}
+            ${kv('Entities', esc((inc.entities || inv.entities || []).join(', ') || '–'))}
+          </dl>`)}
+          ${pane('Confidence', (conf.components || []).map(c => `<div class="comp"><span>${esc(c.name)}</span><div class="bar"><i style="width:${pct(c.value)}"></i></div><span class="mono">${pct(c.value)}</span>
+            <div class="ex">${esc(c.explanation || '')}${c.weight != null ? ` · weight ${esc(c.weight)}` : ''}</div></div>`).join('') || '<div class="empty">No breakdown</div>', { right: pct(conf.value) })}
+          ${pane('Recommended action', `<div class="callout action">${esc(inc.recommended_action || 'Review the evidence.')}</div>`)}
+          ${pane('Related moments', `<div class="related">${(inv.related || []).map(r => `<div class="rel">${player(r)}
+              <div class="mono small">${esc(fmtTC(r.t_start))}${r.similarity != null ? ' · ' + pct(r.similarity) : ''}</div><div>${esc(String(r.caption || '').slice(0, 120))}</div></div>`).join('') || '<div class="empty">None found</div>'}</div>`,
+            { right: `<button class="btn" data-nav="/search?q=${enc(probe)}&source=${enc(inc.source_id)}">Find similar</button>` })}
         </div>
-      </div>`;
+      </div></div>`;
   },
 };
 
 VIEWS.search = {
   mount(main) {
     const r = S.route;
-    main.innerHTML = `<div class="page-head"><div class="grow"><h1>Search the archive</h1>
-      <div class="meta">Secondary tool: Sightline finds incidents on its own; search is for following up.</div></div></div>
+    main.innerHTML = `<div class="stack">${pane('Search the archive', `
       <form class="search-row" id="search-form">
-        <input type="text" name="q" placeholder="e.g. forklift close to a worker" value="${esc(r.q)}">
-        <select name="source"><option value="">All sources</option>${S.sources.map(s => `<option value="${esc(s.id)}" ${s.id === r.source ? 'selected' : ''}>${esc(s.label || s.camera_id)}</option>`).join('')}</select>
+        <input type="text" name="q" placeholder="forklift close to a worker" value="${esc(r.q)}">
+        <select name="source"><option value="">All cameras</option>${S.sources.map(s => `<option value="${esc(s.id)}" ${s.id === r.source ? 'selected' : ''}>${esc(s.label || s.camera_id)}</option>`).join('')}</select>
         <button class="btn primary">Search</button></form>
-      <div id="search-results"></div>`;
+      <div class="small muted" style="margin-top:8px">Follow-up tool. Sightline raises incidents without searches; use this to look for more moments like one it found.</div>`,
+      { right: 'VAST hybrid search · Cosmos-Embed1' })}
+      ${pane('Results', '<div class="empty">Enter a query.</div>', { id: 'search-results' })}</div>`;
     $('#search-form', main).addEventListener('submit', e => {
       e.preventDefault();
       const f = new FormData(e.target);
@@ -523,28 +560,27 @@ VIEWS.search = {
       const res = await GET(`api/search?q=${enc(q)}${source ? '&source=' + enc(source) : ''}`);
       const hits = Array.isArray(res) ? res : (res && res.results) || [];
       box.innerHTML = hits.length ? `<div class="results">${hits.map(h => `<div class="rel">${player(h)}
-        <div class="muted small" style="margin-top:6px">${esc(sourceLabel(h.camera_id || h.source_id))} · ${esc(fmtT(h.t_start))}–${esc(fmtT(h.t_end))}${h.similarity != null ? ' · similarity ' + pct(h.similarity) : ''}</div>
-        <div class="small">${esc(String(h.caption || '').slice(0, 220))}</div></div>`).join('')}</div>` : '<div class="empty">No matches.</div>';
+        <div class="mono small" style="margin-top:4px">${esc(h.camera_id || '')} · ${esc(fmtTC(h.t_start))}${h.similarity != null ? ' · ' + pct(h.similarity) : ''}</div>
+        <div>${esc(String(h.caption || '').slice(0, 200))}</div></div>`).join('')}</div>` : '<div class="empty">No matches.</div>';
     } catch (e) { box.innerHTML = `<div class="empty">Search failed: ${esc(e.message)}</div>`; }
   },
 };
 
-// ----- new footage: Sightline configures itself on clips it has never seen
+// ----- import: Sightline configures itself on footage it has never seen
 VIEWS.new = {
   mount(main) {
     const flags = (S.status && S.status.flags) || {};
-    if (!flags.upload && !MOCK) { main.innerHTML = `<div class="panel"><h2>New footage</h2><div class="empty">Disabled on this deployment (UPLOAD_ENABLED is off).</div></div>`; return; }
+    if (!flags.upload && !MOCK) { main.innerHTML = pane('Import', '<div class="empty">Disabled on this deployment (UPLOAD_ENABLED is off).</div>'); return; }
     const lim = S.status && S.status.limits && S.status.limits.upload_mb;
     S.fresh = S.fresh || {};
-    main.innerHTML = `<div class="page-head"><div class="grow"><h1>New footage</h1>
-      <div class="meta">Give Sightline a clip it has never seen. It looks first, then writes its own ingestion prompt <b>before</b> the footage enters the VAST index.</div></div></div>
-      <div class="grid2">
-        <div class="panel"><h2>Clip</h2>
-          <input type="file" id="nf-file" accept="video/*" hidden>
-          <div class="drop" data-action="nf-pick">Choose a video file${lim ? ` (max ${esc(lim)} MB)` : ''}<div class="small">Self-recorded footage only, H.264 MP4 works best</div></div>
-          <div id="nf-preview"></div></div>
-        <div class="panel"><h2>Autonomous pipeline</h2><div id="nf-pipeline"><div class="empty">Waiting for a clip.</div></div></div>
-      </div>`;
+    main.innerHTML = `<div class="cols2" style="align-items:start">
+      ${pane('Import footage', `
+        <input type="file" id="nf-file" accept="video/*" hidden>
+        <div class="drop" data-action="nf-pick">Choose a video file${lim ? ` (max ${esc(lim)} MB)` : ''}<div class="small">Self-recorded footage only. H.264 MP4 works best.</div></div>
+        <div class="small muted" style="margin-top:10px">Sightline looks at the clip first and writes its own Cosmos ingestion prompt before the footage enters the VAST index.</div>
+        <div id="nf-preview"></div>`)}
+      ${pane('Agent pipeline', '<div class="empty" style="padding:12px">Waiting for a clip.</div>', { id: 'nf-pipeline', flush: true })}
+    </div>`;
     $('#nf-file', main).addEventListener('change', e => this.pick(main, e.target.files[0]));
     if (S.fresh.frames) this.showPreview(main);
   },
@@ -564,7 +600,7 @@ VIEWS.new = {
     $('#nf-preview', main).innerHTML = `
       <div class="player" style="margin-top:12px"><video src="${esc(f.url)}" controls muted playsinline></video></div>
       <div class="keyframes">${f.frames.map(k => `<img src="${k.url}" alt="keyframe at ${fmtT(k.t)}" title="keyframe at ${fmtT(k.t)}">`).join('')}</div>
-      <div class="small muted">${esc(f.file.name)} · ${(f.file.size / 1048576).toFixed(1)} MB · ${fmtT(f.duration)}</div>
+      <div class="small muted mono">${esc(f.file.name)} · ${(f.file.size / 1048576).toFixed(1)} MB · ${fmtT(f.duration)}</div>
       <div class="btn-row" style="margin-top:10px"><button class="btn primary" data-action="nf-submit" ${f.job ? 'disabled' : ''}>Let Sightline configure it</button></div>`;
   },
   async submit(main) {
@@ -588,9 +624,9 @@ VIEWS.new = {
       const [job, run] = await Promise.all([GET(`api/jobs/${enc(f.job)}`), f.source_id ? GET(`api/pipeline/${enc(f.source_id)}`) : null]);
       const done = job.status === 'done' || job.status === 'completed';
       setHTML($('#nf-pipeline', main), pipelineHTML(run) +
-        (job.status === 'failed' ? `<div class="callout warn" style="margin-top:10px">Failed: ${esc(job.error || '')}</div>` : '') +
-        (done && f.source_id ? `<div class="btn-row" style="margin-top:12px"><button class="btn primary" data-nav="/source/${enc(f.source_id)}">Open the new source</button></div>` : ''));
-    } catch (e) { setHTML($('#nf-pipeline', main), `<div class="empty">${esc(e.message)}</div>`); }
+        (job.status === 'failed' ? `<div class="callout warn" style="margin:10px">Failed: ${esc(job.error || '')}</div>` : '') +
+        (done && f.source_id ? `<div class="btn-row" style="padding:10px"><button class="btn primary" data-nav="/source/${enc(f.source_id)}">Open the new camera</button></div>` : ''));
+    } catch (e) { setHTML($('#nf-pipeline', main), `<div class="empty" style="padding:12px">${esc(e.message)}</div>`); }
   },
 };
 
@@ -616,23 +652,25 @@ async function extractKeyframes(file, n) {
   return { frames, duration: v.duration, url };
 }
 
-// ----- live camera: cheap motion gate in the browser, Cosmos only on change or checkpoint
+// ----- live camera: motion gate in the browser, Cosmos only on change or checkpoint
 VIEWS.live = {
   mount(main) {
     const flags = (S.status && S.status.flags) || {};
-    if (!flags.live && !MOCK) { main.innerHTML = `<div class="panel"><h2>Live camera</h2><div class="empty">Disabled on this deployment (LIVE_ENABLED is off).</div></div>`; return; }
-    main.innerHTML = `<div class="page-head"><div class="grow"><h1>Live camera</h1>
-        <div class="meta">Frames pass a motion gate in your browser; Cosmos only sees frames when the scene changes or every 5 s. Measured, not claimed: see the numbers below.</div></div>
-        <div class="btn-row"><button class="btn primary" data-action="live-start" id="live-start">Start camera</button><button class="btn danger" data-action="live-stop">Stop</button></div></div>
-      ${window.isSecureContext ? '' : `<div class="callout warn" style="margin-bottom:14px">This page is not a secure context, so the browser will block the camera. Use HTTPS, or enable chrome://flags/#unsafely-treat-insecure-origin-as-secure for this origin.</div>`}
-      <div class="grid-3-2">
-        <div class="panel"><h2>Camera</h2><div class="player"><video id="live-video" muted playsinline autoplay></video></div><div id="live-gate" style="margin-top:12px"></div></div>
-        <div class="panel"><h2>Sightline's read of this scene</h2><div id="live-config"><div class="empty">Start the camera.</div></div></div>
+    if (!flags.live && !MOCK) { main.innerHTML = pane('Live camera', '<div class="empty">Disabled on this deployment (LIVE_ENABLED is off).</div>'); return; }
+    main.innerHTML = `<div class="stack">
+      ${window.isSecureContext ? '' : `<div class="callout warn">This page is not a secure context, so the browser will block the camera. Use HTTPS, or enable chrome://flags/#unsafely-treat-insecure-origin-as-secure for this origin.</div>`}
+      <div class="cols-3-2">
+        <section class="pane viewer-pane">
+          <header class="pane-h"><span class="pt">Live viewer</span><span class="pr btn-row"><button class="btn primary" data-action="live-start">Start camera</button><button class="btn" data-action="live-stop">Stop</button></span></header>
+          <div class="pane-b" style="aspect-ratio:16/9"><div class="player"><video id="live-video" muted playsinline autoplay></video></div></div>
+          <div id="live-gate"></div>
+        </section>
+        ${pane("Sightline's read of this scene", '<div class="empty">Start the camera.</div>', { id: 'live-config' })}
       </div>
-      <div class="grid2">
-        <div class="panel"><h2>Observations (Cosmos)</h2><div id="live-obs" class="feed"></div></div>
-        <div class="panel"><h2>Live events</h2><div id="live-events" class="feed"></div></div>
-      </div>`;
+      <div class="cols2">
+        ${pane('Observations (Cosmos)', '', { id: 'live-obs', flush: true })}
+        ${pane('Live incidents', '', { id: 'live-events', flush: true })}
+      </div></div>`;
   },
   async start() {
     if (S.live && S.live.stream) return;
@@ -667,8 +705,7 @@ VIEWS.live = {
     const reason = diff > 0.04 ? 'motion' : (now - L.lastSent > 5000 ? 'checkpoint' : null);
     if (!reason || L.inflight) { L.gated++; this.renderGate(); return; }
     L.inflight = true; L.lastSent = now; L.sent++;
-    const bctx = L.big.getContext('2d');
-    bctx.drawImage(v, 0, 0, 640, 360);
+    L.big.getContext('2d').drawImage(v, 0, 0, 640, 360);
     const b64 = L.big.toDataURL('image/jpeg', 0.72).split(',')[1];
     POST(`api/live/${enc(L.sid)}/frame`, { image_b64: b64, motion: diff, reason, ts: new Date().toISOString() })
       .catch(e => toast('Frame rejected: ' + e.message))
@@ -677,12 +714,12 @@ VIEWS.live = {
   },
   renderGate() {
     const L = S.live; const st = (L && L.state && L.state.stats) || {};
-    setHTML($('#live-gate'), L ? `<div class="stats">
-      <div class="stat" title="Frames sampled from the camera (2/s)"><div class="v">${L.captured}</div><div class="l">frames sampled</div></div>
-      <div class="stat" title="Frames sent to the backend after the motion gate"><div class="v">${L.sent}</div><div class="l">sent to Sightline</div></div>
-      <div class="stat" title="Cosmos calls per minute, as measured by the backend"><div class="v">${esc(st.cosmos_calls_per_min ?? '–')}</div><div class="l">Cosmos calls/min</div></div>
-      <div class="stat" title="Median Cosmos latency, as measured by the backend"><div class="v">${st.p50_latency_ms != null ? esc(Math.round(st.p50_latency_ms)) + 'ms' : '–'}</div><div class="l">p50 latency</div></div>
-    </div><div class="small muted">Motion ${(100 * (L.motion || 0)).toFixed(1)}% · ${L.gated} frames skipped by the gate</div>` : '');
+    setHTML($('#live-gate'), L ? `<div class="transport" style="grid-template-columns:repeat(5,auto);justify-content:space-between">
+      <span title="Frames sampled from the camera (2/s)">${L.captured} sampled</span>
+      <span title="Frames sent after the motion gate">${L.sent} sent</span>
+      <span title="Skipped by the motion gate">${L.gated} gated</span>
+      <span title="Measured by the backend">${esc(st.cosmos_calls_per_min ?? '–')} Cosmos/min</span>
+      <span title="Median Cosmos latency, measured">${st.p50_latency_ms != null ? 'p50 ' + esc(Math.round(st.p50_latency_ms)) + 'ms' : 'p50 –'}</span></div>` : '');
   },
   async poll() {
     const L = S.live;
@@ -690,15 +727,15 @@ VIEWS.live = {
     try { L.state = await GET(`api/live/${enc(L.sid)}/state`); } catch (_) { return; }
     const st = L.state;
     const cl = st.classification;
-    setHTML($('#live-config'), cl ? `<div><span class="tag accent">${esc(cap(cl.domain))} · ${pct(cl.confidence)}</span></div>
+    setHTML($('#live-config'), cl ? `<div><span class="tag accent">${esc(cap(cl.domain))} ${pct(cl.confidence)}</span></div>
       <div style="margin:8px 0">${esc(cl.description || '')}</div>
-      ${st.profile ? `<div class="small muted">Watching for:</div><ul class="small">${(st.profile.objectives || []).map(o => `<li>${sevPill(o.severity)} ${esc(o.name)}</li>`).join('')}</ul>` : '<div class="empty small">Planning…</div>'}`
+      ${st.profile ? `<div class="small muted">Watching for:</div><div>${(st.profile.objectives || []).map(o => `<div style="padding:4px 0">${sevPill(o.severity)} <span style="margin-left:6px">${esc(o.name)}</span></div>`).join('')}</div>` : '<div class="empty">Planning…</div>'}`
       : `<div class="empty">Observing… (${(st.observations || []).length}/3 observations before classifying)</div>`);
     setHTML($('#live-obs'), (st.observations || []).slice().reverse().slice(0, 12).map(o => `<div class="feed-item" style="cursor:default">
-      <span class="mono small">${esc(clock(o.ts))}</span><div><div>${esc(o.scene)}</div><div class="fs">${esc((o.entities || []).join(', '))}${o.flags && o.flags.length ? ' · flags: ' + esc(o.flags.join(', ')) : ''}</div></div>
-      <span class="fc">${o.latency_ms != null ? esc(Math.round(o.latency_ms)) + 'ms' : ''}</span></div>`).join('') || '<div class="empty">None yet</div>');
+      <span class="sev-dot"></span><div style="min-width:0"><div class="ft">${esc(o.scene)}</div><div class="fs">${esc(clock(o.ts))} · ${esc((o.entities || []).join(', '))}${o.flags && o.flags.length ? ' · ' + esc(o.flags.join(', ')) : ''}</div></div>
+      <span class="fc">${o.latency_ms != null ? esc(Math.round(o.latency_ms)) + 'ms' : ''}</span></div>`).join('') || '<div class="empty" style="padding:12px">None yet</div>');
     setHTML($('#live-events'), (st.events || []).slice().reverse().map(e => `<div class="feed-item" style="cursor:default">
-      <span>${sevPill(e.severity)}</span><div><div class="ft">${esc(e.title)}</div><div class="fs">${esc(e.reason || '')}</div></div><span class="fc">${esc(clock(e.ts))}</span></div>`).join('') || '<div class="empty">No events</div>');
+      <span class="sev-dot ${esc(e.severity)}"></span><div style="min-width:0"><div class="ft">${esc(e.title)}</div><div class="fs">${esc(e.reason || '')}</div></div><span class="fc">${esc(clock(e.ts))}</span></div>`).join('') || '<div class="empty" style="padding:12px">No incidents</div>');
     this.renderGate();
   },
   stop() {
@@ -732,22 +769,23 @@ async function render() {
   const main = $('#main');
   main._html = null;
   main.innerHTML = '<div class="empty">Loading…</div>';
-  window.scrollTo(0, 0);
+  main.scrollTo(0, 0);
   try {
     await VIEWS[S.route.name].mount(main);
     if (VIEWS[S.route.name].update) await VIEWS[S.route.name].update(main);
-  } catch (e) { main.innerHTML = `<div class="panel">Something went wrong: ${esc(e.message)}</div>`; }
+  } catch (e) { main.innerHTML = `<div class="page-h">Something went wrong: ${esc(e.message)}</div>`; }
+  renderTop();
   renderSidebar();
 }
 
 const ACTIONS = {
-  'select-source': el => { S.selected = el.dataset.id; refresh(); },
-  'configure': async el => { await POST(`api/sources/${enc(el.dataset.id)}/configure`, {}); toast('Sightline is looking at this source…', 'info'); },
+  'select-source': el => { S.selected = el.dataset.id; },
+  'ov-tab': el => { S.ovTab = el.dataset.tab; },
+  'configure': async el => { await POST(`api/sources/${enc(el.dataset.id)}/configure`, {}); toast('Sightline is looking at this camera…', 'info'); },
   'monitor-start': async el => { await POST(`api/sources/${enc(el.dataset.id)}/monitor`, {}); toast('Monitoring started (archive replay)', 'info'); },
   'monitor-stop': async el => { await DEL(`api/sources/${enc(el.dataset.id)}/monitor`); },
   'plan-reingest': async el => { await POST(`api/sources/${enc(el.dataset.id)}/reingest/plan`, {}); },
   'approve-reingest': async el => { el.disabled = true; await POST(`api/reingest/${enc(el.dataset.job)}/approve`, {}); toast('Re-ingest started on VAST', 'info'); },
-  'toggle-conf': () => { const c = $('#conf-components'); if (c) c.classList.toggle('open'); },
   'toggle-caption': el => el.classList.toggle('open'),
   'play-seg': el => {
     const seg = el.dataset.seg;
@@ -775,12 +813,12 @@ document.addEventListener('click', async e => {
   if (n) { e.preventDefault(); nav(n.dataset.nav); }
 });
 
-// A clip that fails to load falls back to its caption instead of a black box.
+// A clip that fails to load falls back to a placeholder instead of a black box.
 document.addEventListener('error', e => {
   if (e.target && e.target.tagName === 'VIDEO' && !e.target.srcObject) {
     const ph = document.createElement('div');
     ph.className = 'ph';
-    ph.innerHTML = '<div><div class="big">Clip unavailable</div><div class="small">VSS stream did not load</div></div>';
+    ph.innerHTML = '<div><div class="big">Clip unavailable</div><div>VSS stream did not load</div></div>';
     e.target.replaceWith(ph);
   }
 }, true);
@@ -822,11 +860,11 @@ function loadScript(src) {
 async function boot() {
   if (MOCK) await loadScript('mock.js');
   await refreshStatus();
-  await refresh();
   window.addEventListener('hashchange', render);
   await render();
+  await refresh();
   setInterval(refresh, POLL_MS);
   setInterval(refreshStatus, STATUS_MS);
 }
 
-boot().catch(e => { $('#main').innerHTML = `<div class="panel">Failed to start: ${esc(e.message)}</div>`; });
+boot().catch(e => { $('#main').innerHTML = `<div class="page-h">Failed to start: ${esc(e.message)}</div>`; });
