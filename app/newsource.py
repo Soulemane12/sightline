@@ -401,14 +401,14 @@ class NewSourceService:
             self._step(sid, "vast", VAST_LABEL, "failed", "VAST did not accept the upload")
             return
         self._vast(sid, status="indexing", object_key=key, submitted_at=_now_iso(), prompt_chars=len(form["custom_prompt"]))
-        self._step(sid, "vast", VAST_LABEL, "running", f"saved to VAST S3 ({key.rsplit('/', 1)[-1]}) · indexing…")
+        self._step(sid, "vast", VAST_LABEL, "done", f"saved to VAST S3 ({key.rsplit('/', 1)[-1]}) · DataEngine indexing in the background")
         t0 = time.monotonic()
         while time.monotonic() - t0 < VAST_MAX_WAIT_S:
             if await self.poll_vast_once(sid):
                 return
             await asyncio.sleep(VAST_POLL_S)
         self._vast(sid, status="indexing", note=f"still indexing after {int(VAST_MAX_WAIT_S // 60)} min (VAST queue)")
-        self._step(sid, "vast", VAST_LABEL, "running", "saved to VAST S3 · still indexing (VAST queue)")
+        self._step(sid, "vast", VAST_LABEL, "done", "saved to VAST S3 · still indexing in the background (VAST queue)")
 
     async def poll_vast_once(self, sid: str) -> bool:
         """True once VAST reports the clip indexed (real numbers from the dashboard, never assumed)."""
@@ -431,8 +431,8 @@ class NewSourceService:
                                f"indexed in VastDB · {indexed} segments · searchable in VAST as {sid}")
                     return True
                 self._vast(sid, status="indexing", segments=indexed, expected=expected)
-                self._step(sid, "vast", VAST_LABEL, "running",
-                           f"saved to VAST S3 · indexing {indexed}/{expected or '?'} segments")
+                self._step(sid, "vast", VAST_LABEL, "done",
+                           f"saved to VAST S3 · indexing in the background: {indexed}/{expected or '?'} segments")
                 return False
         return False
 

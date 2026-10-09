@@ -200,7 +200,11 @@ function timelineHTML(src, incs, tags) {
         <div class="tl-ruler">${ticks}</div>
         <div class="tl-lane">${clips}</div>
         <div class="tl-lane">${marks}${tagMarks}</div>
-        ${pos != null ? `<div class="playhead" style="left:${(pos * 100).toFixed(2)}%" title="Replay clock"></div>` : ''}
+        ${(() => {
+          const w = S.ovWatch && S.ovWatch.id === src.id ? S.ovWatch : null;
+          const at = w ? w.start : pos;
+          return at != null ? `<div class="playhead" id="ov-head" style="left:${(at * 100).toFixed(2)}%" title="${w ? 'What the viewer is playing' : 'Replay clock'}"></div>` : '';
+        })()}
         ${S.scrub && S.scrub.id === src.id ? `<div class="scrubhead" style="left:${(S.scrub.frac * 100).toFixed(2)}%"><span>${esc(scrubLabel(src, S.scrub.frac))}</span></div>` : ''}
       </div>
     </div>
@@ -614,6 +618,12 @@ VIEWS.overview = {
     const latest = mine[0];
     const ev = latest && (latest.evidence || []).find(e => e.role === 'event');
     const replay = live ? (src.replay || null) : null;
+    const segTotal = (src.replay && src.replay.total_segments) || src.segment_count || 0;
+    const watchStart = !segTotal ? null
+      : S.scrub && S.scrub.id === src.id && S.scrub.seg ? Math.floor(S.scrub.frac * segTotal) / segTotal
+      : latest && ev && latest.replay_pos != null ? latest.replay_pos
+      : replay && replay.segment_uri ? (replay.segment || 0) / segTotal : null;
+    S.ovWatch = watchStart == null ? null : { id: src.id, start: watchStart, span: 1 / segTotal, total: segTotal, segSec: src.segment_seconds || 5 };
     if (S.scrub && S.scrub.id === src.id && (S.scrub.seg || S.scrub.loading || S.scrub.error)) {
       renderScrubViewer();
     } else if (latest && ev) {
@@ -654,6 +664,7 @@ VIEWS.overview = {
     const n = mine.length;
     setHTML($('#ov-report', main), `<button class="btn primary" data-nav="/report?${esc(filterQuery(S.filter))}"${n ? '' : ' disabled'}>Build report from ${n === 1 ? 'this incident' : `these ${n} incidents`}</button>`);
     if (!DRAG) setHTML($('#ov-timeline', main), timelineHTML(src, mine, tags));
+    syncOvHead();
   },
 };
 
@@ -1280,6 +1291,15 @@ function clipTimelineHTML(dur, windows, marks, analyzed) {
     </div>
     <div class="tl-foot">Uploaded clip · <span id="nf-tc">${esc(fmtClipT(0, dur))}</span> / ${esc(fmtClipT(dur, dur))} · ${wins.length} analysis windows · ${n.incident} incident(s) · ${n.tagged} tag(s) · click or drag the timeline to scrub · click a marker to jump to it</div>`;
 }
+function syncOvHead() {
+  const w = S.ovWatch, head = $('#ov-head');
+  if (!w || !head || DRAG) return;
+  const v = $('#ov-player video');
+  const p = v && v.duration ? Math.min(1, v.currentTime / v.duration) : 0;
+  head.style.left = (Math.min(1, w.start + p * w.span) * 100).toFixed(3) + '%';
+  const tc = $('#ov-transport .tc');
+  if (tc && v) tc.textContent = fmtTC((w.start * w.total + p) * w.segSec);
+}
 function syncClipHead() {
   const v = $('#nf-video'), head = $('#nf-head'), dur = (S.fresh && S.fresh.dur) || (v && v.duration) || 0;
   if (!v || !head || !dur) return;
@@ -1309,11 +1329,14 @@ document.addEventListener('pointerdown', e => {
 });
 document.addEventListener('pointermove', e => { if (SEEK) seekTo(seekFrac(e)); });
 document.addEventListener('pointerup', () => { SEEK = null; });
-['timeupdate', 'seeked', 'loadedmetadata'].forEach(ev => document.addEventListener(ev, e => { if (e.target && e.target.id === 'nf-video') syncClipHead(); }, true));
+// Media events don't bubble; capture them on the document. The upload page and the Monitor viewer
+// each move their timeline's playhead with the video that is playing.
+const headSync = t => t && t.id === 'nf-video' ? syncClipHead : t && t.closest && t.closest('#ov-player') ? syncOvHead : null;
+['timeupdate', 'seeked', 'loadedmetadata'].forEach(ev => document.addEventListener(ev, e => { const f = headSync(e.target); if (f) f(); }, true));
 document.addEventListener('play', e => {
-  if (!e.target || e.target.id !== 'nf-video') return;
-  const v = e.target;
-  (function tick() { syncClipHead(); if (!v.paused && !v.ended && v.isConnected) requestAnimationFrame(tick); })();
+  const f = headSync(e.target), v = e.target;
+  if (!f) return;
+  (function tick() { f(); if (!v.paused && !v.ended && v.isConnected) requestAnimationFrame(tick); })();
 }, true);
 
 function uploadWithProgress(path, fd, onProgress) {
@@ -1738,12 +1761,13 @@ async function refresh() {
     S.incidents = dedupeIncidents(Array.isArray(incidents) ? incidents : []);
     if (S.uploadEnabled) { try { S.uploads = await GET('api/newsource'); } catch (_) { S.uploads = S.uploads || []; } }
     if (!S.selected || !sourceById(S.selected)) S.selected = (defaultFeed() || {}).id || null;
-    renderTop();
-    renderSidebar();
-    const v = VIEWS[S.route.name];
-    if (v && v.update) await v.update($('#main'));
     if (S.offline) toast('Backend reachable again', 'info');
     S.offline = false;
+    // A display bug must not look like an outage or stop the other panes from updating.
+    const v = VIEWS[S.route.name];
+    for (const [name, fn] of [['top bar', renderTop], ['sidebar', renderSidebar], ['page', async () => { if (v && v.update) await v.update($('#main')); }]]) {
+      try { await fn(); } catch (err) { console.error(`Sightline: ${name} render failed`, err); }
+    }
   } catch (e) {
     if (!S.offline) toast('Backend unreachable: ' + e.message);
     S.offline = true;

@@ -144,7 +144,7 @@ def test_vast_pending_is_reported_honestly(monkeypatch):
     sid = asyncio.run(go())
     vast = svc.view(sid)["upload"]["vast"]
     step = next(s for s in svc.view(sid)["pipeline"]["steps"] if s["key"] == "vast")
-    assert vast["status"] == "indexing" and step["status"] == "running" and "still indexing" in step["summary"]
+    assert vast["status"] == "indexing" and step["status"] == "done" and "still indexing" in step["summary"]
 
 
 def test_cosmos_down_fails_honestly(monkeypatch):

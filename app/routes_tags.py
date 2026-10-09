@@ -80,7 +80,7 @@ async def _clip_bytes(tag: dict[str, Any]) -> bytes:
         if not path:
             raise FileNotFoundError("uploaded file is gone (pod restarted)")
         if path.stat().st_size > CHECK_MAX_BYTES:
-            raise ValueError("clip too large to check")
+            raise ValueError(f"the file is {path.stat().st_size / 1048576:.0f} MB; export it at 720p to get Sightline's look")
         return path.read_bytes()
     if not tag.get("segment"):
         raise ValueError("no segment")
@@ -116,7 +116,8 @@ async def _check(tag_id: str) -> None:
         check = await asyncio.wait_for(run(), timeout=CHECK_TIMEOUT_S)
     except Exception as e:  # noqa: BLE001
         log.info("tag check skipped: %s", type(e).__name__)
-        check = {"status": "skipped", "text": f"Sightline could not look at this clip ({type(e).__name__})"}
+        why = str(e) if isinstance(e, (ValueError, FileNotFoundError)) and str(e) else type(e).__name__
+        check = {"status": "skipped", "text": f"Sightline could not look at this clip: {why}"}
     tag = store.get("tag", tag_id)
     if tag:
         store.put("tag", tag_id, {**tag, "check": {**check, "at": _now(), "by": "Cosmos (direct look)"}},
