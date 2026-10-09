@@ -177,6 +177,21 @@ All paths are relative to `/app/`. All JSON. Long operations return `{job_id}` a
 | `POST api/newsource` (multipart: file + keyframes) | job → self-configuration on new footage, then optional VSS upload with the generated prompt | Intel (flag) |
 | `GET api/patterns?source=` | `[{statement, count, evidence:[Evidence]}]` | Intel (flag) |
 
+### 5a. Exact response shapes the UI consumes (frozen 10-09 by the built frontend; `app/mock.js` is the reference implementation)
+
+Backend agents: match these fields. Anything optional can be omitted; the UI degrades. Run the UI against your dev server with no `?mock=1` to check.
+
+- **`GET api/status`** → `{ vss:{ok, detail?}, gpu:{cosmos:{ok}, yolo:{ok}, embed:{ok}, canary:{ok}}, llm:{ok, model, mode:"llm"|"rules_only"}, state:{backend:"vastdb"|"local", data_origin:"vastdb"|"seed"|"memory", snapshot_at?}, flags:{live, upload, weave, sports}, replay:{speed}, limits:{upload_mb}, stats?:{candidates, rejected, incidents} }`
+- **`GET api/sources`** → `[{ id, camera_id, label, location, capture_type, segment_count, status, classification:{domain, confidence}|null, profile_summary:{title, objectives:<count>, entities:[str], mode}|null, incident_counts:{critical,high,medium,low}, replay:{active, speed, segment, total_segments, segment_uri?, caption?}|null }]`
+- **`GET api/sources/{id}`** → the same base fields plus `classification` (full EnvironmentClassification), `profile` (full MonitoringProfile, optionally `dropped:[{id, name, reason}]` for objectives judged not applicable), `pipeline` (PipelineRun), `reingest` (latest ReingestJob or null), `evolution` ({steps}), `replay`, `incidents` ([Incident])
+- **ReingestJob extras:** `filename`, `clips`, `eta` (string), `reason` (why this target), `started_at`, `finished_at`, `failed_stage`, `verify:{changed, total, with_terms}`
+- **PipelineStep:** `{key, label?, status, summary, started_at?, ended_at?, trace_url?}`. `label` overrides the default label for custom steps (e.g. upload/index in new footage).
+- **Incident extras:** `search_hint` (probe used by "Find similar"), `replay_pos` (0–1, for marks on the replay bar), `mode`, `created_at` (ISO; feed sort key). Evidence: `{role, segment, t_start, t_end, caption, yolo:{classes:{label:max_count}}, clip_url:"api/clip?source=…", camera_id?, similarity?}`.
+- **`GET api/search?q=&source=`** → `[Evidence-like hit + similarity]` (or `{results:[…]}`)
+- **`POST api/newsource`** (multipart: `file`, `keyframe_0..3` JPEGs, `keyframe_times` JSON) → `{job_id, source_id}`; `GET api/jobs/{id}` → `{status:"running"|"done"|"failed", error?}`
+- **`POST api/live/session`** → `{sid}`; `POST api/live/{sid}/frame` `{image_b64, motion, reason:"motion"|"checkpoint", ts}`; `GET api/live/{sid}/state` → `{observations:[{ts, scene, entities, flags, latency_ms}], events:[{ts, severity, title, reason}], classification?, profile?:{objectives:[{name, severity}]}, stats:{frames_received, cosmos_calls_per_min, p50_latency_ms}}`
+- Times: `t_start`, `t_end`, `started_at`, `peak_at` and `ended_at` on incidents are **seconds within the video** (numbers). `created_at`, job and step times are ISO strings.
+
 ## 6. Core flows
 
 ### 6.1 Self-configuration (`configurator.py`), the centerpiece

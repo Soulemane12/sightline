@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sightline</title>
+<script>
+  // The workshop App button's path prefix is unknown, so resolve the app root at runtime.
+  // Every relative URL below (styles, scripts, api/...) hangs off this <base>.
+  (function () {
+    var p = location.pathname;
+    if (!p.endsWith('/')) p = /\.[a-z0-9]+$/i.test(p) ? p.slice(0, p.lastIndexOf('/') + 1) : p + '/';
+    document.write('<base href="' + p.replace(/["<>]/g, '') + '">');
+  })();
+</script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand" data-nav="/">
+    <span class="logo">◉</span>
+    <span class="name">SIGHTLINE</span>
+    <span class="tagline">Self-configuring video safety agents</span>
+  </div>
+  <div class="monitor-state" id="monitor-state"></div>
+  <div class="chips" id="health"></div>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar"></aside>
+  <main class="main" id="main"><div class="empty">Loading…</div></main>
+</div>
+<div class="toast" id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>
