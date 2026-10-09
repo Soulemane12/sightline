@@ -192,7 +192,7 @@ function timelineHTML(src, incs, tags) {
   const marks = incs.filter(i => i.replay_pos != null).map(i =>
     `<span class="tl-mark ${esc(i.severity)}" style="left:${(i.replay_pos * 100).toFixed(2)}%" data-nav="/incident/${enc(i.id)}" title="${esc(i.title)} · ${esc(SEV_LABEL[i.severity] || '')} · ${pct(i.confidence && i.confidence.value)}"></span>`).join('');
   const tagMarks = (tags || []).filter(t => t.frac != null).map(t =>
-    `<span class="tl-mark tag" style="left:${(t.frac * 100).toFixed(2)}%" data-action="tag-open" data-id="${esc(src.id)}" data-frac="${esc(t.frac)}" title="Your tag · ${esc(t.note)}"></span>`).join('');
+    `<span class="tl-mark tag" style="left:${(t.frac * 100).toFixed(2)}%" data-action="tag-open" data-id="${esc(src.id)}" data-frac="${esc(t.frac)}" ${areaAttrs(t.area, t.note)} title="Your tag · ${esc(t.note)}"></span>`).join('');
   return `<div class="tl">
       <div class="tl-labels"><div class="tl-l ruler-l">${segSec ? 'TC' : 'SEG'}</div><div class="tl-l">Footage</div><div class="tl-l">Markers</div></div>
       <div class="tl-lanes" data-scrub="${esc(src.id)}" title="Click or drag to scrub through this camera's footage">
@@ -456,7 +456,7 @@ VIEWS.overview = {
       + (tags.length ? `<div class="side-h">Your tags</div><div class="feed">${tags.map(tg => tagItemHTML(tg, `data-action="tag-open" data-id="${esc(src.id)}" data-frac="${esc(tg.frac ?? 0)}"`)).join('')}</div>` : ''));
     const sc = S.scrub && S.scrub.id === src.id && S.scrub.seg ? S.scrub : null;
     setHTML($('#ov-tagbar', main), sc
-      ? tagFormHTML({ source: src.id, segment: sc.seg.source_uri, tstart: sc.seg.t_start, tend: sc.seg.t_end, frac: sc.frac })
+      ? tagFormHTML({ source: src.id, video: '#ov-player video', segment: sc.seg.source_uri, tstart: sc.seg.t_start, tend: sc.seg.t_end, frac: sc.frac })
       : '<div class="tag-hint">To tag a moment yourself, drag the timeline to it.</div>');
     if (!DRAG) setHTML($('#ov-timeline', main), timelineHTML(src, mine, tags));
   },
@@ -835,7 +835,7 @@ VIEWS.new = {
     $('#nf-preview', main).innerHTML = `
       <div class="player" style="margin-top:12px"><video id="nf-video" src="${esc(url)}" controls muted playsinline></video></div>
       <div id="nf-markers"></div>
-      ${f.sid ? tagFormHTML({ source: f.sid }) : ''}
+      ${f.sid ? tagFormHTML({ source: f.sid, video: '#nf-video' }) : ''}
       ${f.frames ? `<div class="small muted mono" style="margin-top:6px">${esc(f.file ? f.file.name : '')} · ${f.file ? (f.file.size / 1048576).toFixed(1) + ' MB · ' : ''}${fmtT(f.duration)} · ${f.frames.length} frames sampled</div>
       <div class="btn-row" style="margin-top:10px"><button class="btn primary" data-action="nf-submit" ${f.sid ? 'disabled' : ''}>${f.sid ? 'Sightline is on it' : 'Let Sightline configure it'}</button></div>` : ''}
       ${f.sid ? `<div class="btn-row" style="margin-top:10px"><button class="btn danger" data-action="remove-upload" data-sid="${esc(f.sid)}">Remove this upload</button></div>` : ''}`;
@@ -892,7 +892,7 @@ VIEWS.new = {
       </div>
       <div class="cols2" style="margin-top:6px">
         ${pane('Cosmos prompt Sightline wrote for this clip', pr ? `<div class="editor"><pre class="prompt-box">${esc(pr.text)}</pre><div class="editor-status"><span class="ok">${esc(pr.chars ?? (pr.text || '').length)}/800</span><span>${pr.template_fallback ? 'template fallback' : 'written by Sightline'}</span></div></div>` : '<div class="empty">Writing…</div>')}
-        ${pane('Markers on the timeline', marks.length ? `<div class="feed">${marks.map(m => m.status === 'tagged' ? tagItemHTML({ id: m.tag_id, note: m.title, t: m.t, check: m.check }, `data-action="nf-seek" data-t="${esc(m.t)}"`) : `<div class="feed-item" ${m.incident_id ? `data-nav="/incident/${enc(m.incident_id)}"` : `data-action="nf-seek" data-t="${esc(m.t_start ?? m.t)}"`}>
+        ${pane('Markers on the timeline', marks.length ? `<div class="feed">${marks.map(m => m.status === 'tagged' ? tagItemHTML({ id: m.tag_id, note: m.title, t: m.t, check: m.check, area: m.area }, `data-action="nf-seek" data-t="${esc(m.t)}"`) : `<div class="feed-item" ${m.incident_id ? `data-nav="/incident/${enc(m.incident_id)}"` : `data-action="nf-seek" data-t="${esc(m.t_start ?? m.t)}"`}>
             <span class="sev-dot ${esc(m.status === 'incident' ? (m.severity || 'medium') : 'low')}"></span>
             <div style="min-width:0"><div class="ft">${esc(m.title)}</div><div class="fs">${esc(fmtT(m.t_start))}–${esc(fmtT(m.t_end))} · ${esc(m.status)}</div></div>
             <span class="fc">${m.confidence != null ? pct(m.confidence) : ''}</span></div>`).join('')}</div>` : '<div class="empty" style="padding:12px">No markers yet.</div>', { flush: true })}
@@ -911,7 +911,7 @@ function clipTimelineHTML(dur, windows, marks, analyzed) {
     const a = Math.max(0, w.t_start / dur), b = Math.min(1, (w.t_end ?? w.t_start) / dur);
     return `<span class="tl-clip ${analyzed ? 'done' : ''}" style="left:calc(${(a * 100).toFixed(2)}% + 1px);width:calc(${(Math.max(0.005, b - a) * 100).toFixed(2)}% - 2px)" title="${esc(fmtT(w.t_start))}–${esc(fmtT(w.t_end))}"></span>`;
   }).join('');
-  const mk = marks.map(m => `<span class="tl-mark ${esc(m.status === 'tagged' ? 'tag' : m.status === 'incident' ? (m.severity || 'medium') : 'low')}" style="left:${Math.min(100, 100 * (m.t || 0) / dur).toFixed(2)}%;${m.status === 'rejected' ? 'opacity:.35;' : ''}" data-action="nf-seek" data-t="${esc(m.t_start ?? m.t)}" title="${esc(fmtT(m.t))} · ${esc(m.title)} · ${esc(m.status === 'tagged' ? 'your tag' : m.status)}${m.confidence != null ? ' · ' + pct(m.confidence) : ''}"></span>`).join('');
+  const mk = marks.map(m => `<span class="tl-mark ${esc(m.status === 'tagged' ? 'tag' : m.status === 'incident' ? (m.severity || 'medium') : 'low')}" style="left:${Math.min(100, 100 * (m.t || 0) / dur).toFixed(2)}%;${m.status === 'rejected' ? 'opacity:.35;' : ''}" data-action="nf-seek" data-t="${esc(m.t_start ?? m.t)}" ${areaAttrs(m.area, m.title)} title="${esc(fmtT(m.t))} · ${esc(m.title)} · ${esc(m.status === 'tagged' ? 'your tag' : m.status)}${m.confidence != null ? ' · ' + pct(m.confidence) : ''}"></span>`).join('');
   const n = { incident: 0, tagged: 0 };
   marks.forEach(m => { if (n[m.status] != null) n[m.status]++; });
   return `<div class="tl" style="margin-top:8px">
@@ -983,6 +983,7 @@ function tagFormHTML(o) {
   const attrs = Object.entries(o).filter(([, v]) => v != null).map(([k, v]) => `data-${k}="${esc(v)}"`).join(' ');
   return `<form class="tagbar" data-tag-form ${attrs}>
     <input name="note" maxlength="300" autocomplete="off" placeholder="Something happened here? Describe what you saw">
+    <button type="button" class="btn" data-action="tag-area" title="Drag a box on the video around where Sightline should look">Mark area</button>
     <button class="btn">Tag this moment</button></form>`;
 }
 function tagCheckHTML(c) {
@@ -995,11 +996,78 @@ function tagCheckHTML(c) {
 }
 function tagItemHTML(tg, openAttr) {
   const when = tg.t != null ? fmtT(tg.t) : (tg.t_start != null ? fmtTC(tg.t_start).slice(0, 8) : '');
-  return `<div class="feed-item tag-item" ${openAttr || ''}>
+  return `<div class="feed-item tag-item" ${openAttr || ''} ${areaAttrs(tg.area, tg.note)}>
     <span class="sev-dot tag"></span>
-    <div style="min-width:0"><div class="ft">${esc(tg.note)}</div><div class="fs">Tagged by you${when ? ' · ' + esc(when) : ''}</div>
+    <div style="min-width:0"><div class="ft">${esc(tg.note)}</div><div class="fs">Tagged by you${when ? ' · ' + esc(when) : ''}${tg.area ? ' · look at the ' + esc(areaWords(tg.area)) : ''}</div>
     <div class="fs">${tagCheckHTML(tg.check)}</div></div>
     <button class="linkbtn" data-action="tag-remove" data-id="${esc(tg.id)}" title="Remove this tag">✕</button></div>`;
+}
+
+// ----- "look here": the person drags a box on the frame; it travels with the tag and steers Sightline's look
+const areaAttrs = (a, note) => a ? `data-area="${esc(JSON.stringify(a))}" data-note="${esc(note || '')}"` : '';
+function areaWords(a) {
+  const cx = a.x + a.w / 2, cy = a.y + a.h / 2;
+  const h = cx < 1 / 3 ? 'left' : cx > 2 / 3 ? 'right' : 'center';
+  const v = cy < 1 / 3 ? 'upper' : cy > 2 / 3 ? 'lower' : 'middle';
+  return v === 'middle' && h === 'center' ? 'center' : `${v} ${h}`;
+}
+function videoContentRect(v) {
+  const W = v.clientWidth, H = v.clientHeight, vw = v.videoWidth || 16, vh = v.videoHeight || 9;
+  const sc = Math.min(W / vw, H / vh);
+  return { left: (W - vw * sc) / 2, top: (H - vh * sc) / 2, width: vw * sc, height: vh * sc };
+}
+function areaLayer(v) {
+  const host = v.closest('.player');
+  let layer = host.querySelector('.area-layer');
+  if (!layer) { layer = document.createElement('div'); layer.className = 'area-layer'; host.appendChild(layer); }
+  return layer;
+}
+function drawArea(v, a, label) {
+  const layer = areaLayer(v);
+  layer.querySelectorAll('.area-box').forEach(b => b.remove());
+  if (!a) return layer;
+  const r = videoContentRect(v), b = document.createElement('div');
+  b.className = 'area-box';
+  Object.assign(b.style, { left: r.left + a.x * r.width + 'px', top: r.top + a.y * r.height + 'px', width: a.w * r.width + 'px', height: a.h * r.height + 'px' });
+  if (label) { const sp = document.createElement('span'); sp.textContent = label; b.appendChild(sp); }
+  layer.appendChild(b);
+  return layer;
+}
+function showArea(v, a, label) {
+  if (!v) return;
+  if (a && !v.videoWidth) { v.addEventListener('loadedmetadata', () => drawArea(v, a, label), { once: true }); return; }
+  drawArea(v, a, label);
+}
+function startAreaDraw(form) {
+  const v = $(form.dataset.video || '#nf-video');
+  if (!v) { toast('No video to mark'); return; }
+  v.pause();
+  const layer = drawArea(v, null);
+  layer.classList.add('drawing');
+  toast('Drag a box around where Sightline should look', 'info');
+  let start = null, box = null;
+  const pt = e => {
+    const lr = layer.getBoundingClientRect(), r = videoContentRect(v);
+    return { x: Math.max(0, Math.min(1, (e.clientX - lr.left - r.left) / r.width)), y: Math.max(0, Math.min(1, (e.clientY - lr.top - r.top) / r.height)) };
+  };
+  layer.onpointerdown = e => { e.preventDefault(); start = pt(e); layer.setPointerCapture(e.pointerId); };
+  layer.onpointermove = e => {
+    if (!start) return;
+    const p = pt(e);
+    box = { x: Math.min(start.x, p.x), y: Math.min(start.y, p.y), w: Math.abs(p.x - start.x), h: Math.abs(p.y - start.y) };
+    drawArea(v, box);
+  };
+  layer.onpointerup = () => {
+    layer.onpointerdown = layer.onpointermove = layer.onpointerup = null;
+    layer.classList.remove('drawing');
+    if (!box || box.w < 0.02 || box.h < 0.02) { drawArea(v, null); toast('Box too small; press Mark area and drag again'); return; }
+    box = Object.fromEntries(Object.entries(box).map(([k, n]) => [k, Math.round(n * 1000) / 1000]));
+    S.tagArea = { form, box };
+    drawArea(v, box, 'Sightline looks here');
+    const b = form.querySelector('[data-action="tag-area"]');
+    if (b) b.textContent = `Area: ${areaWords(box)}`;
+    form.note.focus();
+  };
 }
 
 async function extractFrames(file) {
@@ -1209,14 +1277,24 @@ const ACTIONS = {
   },
   'nf-pick': () => $('#nf-file') && $('#nf-file').click(),
   'nf-submit': () => VIEWS.new.submit($('#main')),
-  'nf-seek': el => { const v = $('#nf-video'); if (v) { v.currentTime = Number(el.dataset.t) || 0; v.play().catch(() => {}); } },
+  'nf-seek': el => {
+    const v = $('#nf-video');
+    if (!v) return;
+    v.currentTime = Number(el.dataset.t) || 0;
+    if (el.dataset.area) { v.pause(); showArea(v, JSON.parse(el.dataset.area), el.dataset.note); }
+    else { drawArea(v, null); v.play().catch(() => {}); }
+  },
   'tag-remove': async el => {
     await DEL(`api/tags/${enc(el.dataset.id)}`);
     toast('Tag removed', 'info');
     const m = $('#main');
     if (S.route.name === 'new') VIEWS.new.update(m); else if (S.route.name === 'overview') VIEWS.overview.update(m);
   },
-  'tag-open': el => scrubCommit(el.dataset.id, Number(el.dataset.frac) || 0),
+  'tag-open': async el => {
+    await scrubCommit(el.dataset.id, Number(el.dataset.frac) || 0);
+    if (el.dataset.area) showArea($('#ov-player video'), JSON.parse(el.dataset.area), el.dataset.note);
+  },
+  'tag-area': el => startAreaDraw(el.closest('form')),
   'nf-open': el => { S.fresh = { sid: el.dataset.sid }; VIEWS.new.showPreview($('#main')); },
   'live-start': () => VIEWS.live.start(),
   'live-stop': () => VIEWS.live.stop(),
@@ -1243,9 +1321,13 @@ document.addEventListener('submit', async e => {
   const d = f.dataset, body = { source_id: d.source, note };
   if (d.segment) Object.assign(body, { segment: d.segment, t_start: Number(d.tstart), t_end: Number(d.tend), frac: Number(d.frac) });
   else { const v = $('#nf-video'); body.t = v ? v.currentTime : 0; }
+  if (S.tagArea && S.tagArea.form === f) body.area = S.tagArea.box;
   try {
     await POST('api/tags', body);
     f.note.value = '';
+    S.tagArea = null;
+    const ab = f.querySelector('[data-action="tag-area"]');
+    if (ab) ab.textContent = 'Mark area';
     toast('Tagged. Sightline is taking its own look.', 'info');
     const m = $('#main');
     if (S.route.name === 'new') VIEWS.new.update(m); else if (S.route.name === 'overview') VIEWS.overview.update(m);

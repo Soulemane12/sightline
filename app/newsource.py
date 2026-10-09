@@ -487,7 +487,7 @@ class NewSourceService:
             if tg:
                 t = float(tg.get("t") or 0.0)
                 markers.append({"tag_id": tg.get("id"), "status": "tagged", "t_start": t, "t_end": t, "t": t,
-                                "title": tg.get("note"), "check": tg.get("check") or {}, "severity": None,
+                                "title": tg.get("note"), "check": tg.get("check") or {}, "area": tg.get("area"), "severity": None,
                                 "confidence": None, "incident_id": None})
         markers.sort(key=lambda m: m["t"] or 0)
         prof = self.store.get_profile(sid) or {}

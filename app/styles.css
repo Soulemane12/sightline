@@ -341,3 +341,8 @@ input[type=text]:focus, select:focus { outline: none; border-color: var(--accent
 .tag-verdict { font-weight: 600; }
 .tag-verdict.ok { color: var(--ok); }
 .tag-verdict.bad { color: var(--high); }
+/* "look here" box drawn on the video for a tag */
+.area-layer { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+.area-layer.drawing { pointer-events: auto; cursor: crosshair; background: rgba(0, 0, 0, 0.25); }
+.area-box { position: absolute; border: 2px solid var(--accent); background: rgba(76, 155, 255, 0.12); border-radius: 2px; }
+.area-box span { position: absolute; top: -20px; left: -2px; padding: 1px 6px; background: var(--accent); color: #0b1220; font: 600 10.5px var(--mono); border-radius: 2px; white-space: nowrap; }

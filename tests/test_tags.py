@@ -82,3 +82,9 @@ def test_fallback_prompt_comes_from_the_objectives_and_fits():
     assert len(text) <= 800 and "objective_0" in text and "FLAGS:" in text
     short = prompts.objective_prompt("sports", [("Distressed swimmer", "distressed_swimmer")], 800)
     assert "Distressed swimmer" in short and "basketball" not in short.lower()
+
+
+def test_area_steers_the_question():
+    q = routes_tags._question({"note": "swimmer goes under", "t": 6.2, "area": {"x": 0.05, "y": 0.1, "w": 0.2, "h": 0.2}})
+    assert "upper left part of the frame" in q and "5% to 25% from the left" in q and "show this there" in q
+    assert "Look specifically" not in routes_tags._question({"note": "x", "t": 1.0})

@@ -29,6 +29,14 @@ CHECK_TIMEOUT_S = float(os.getenv("TAG_CHECK_TIMEOUT_S", "60"))
 _TASKS: set[asyncio.Task] = set()
 
 
+class Area(BaseModel):
+    """Where the person says to look, as fractions of the frame from the top-left corner."""
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
+    w: float = Field(gt=0, le=1)
+    h: float = Field(gt=0, le=1)
+
+
 class TagIn(BaseModel):
     source_id: str
     note: str = Field(min_length=1, max_length=300)
@@ -37,17 +45,31 @@ class TagIn(BaseModel):
     t_start: Optional[float] = None
     t_end: Optional[float] = None
     frac: Optional[float] = None       # feed: position on the feed timeline (0..1)
+    area: Optional[Area] = None        # optional box: where Sightline should look
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def area_words(a: dict[str, float]) -> str:
+    cx, cy = a["x"] + a["w"] / 2, a["y"] + a["h"] / 2
+    h = "left" if cx < 1 / 3 else "right" if cx > 2 / 3 else "center"
+    v = "upper" if cy < 1 / 3 else "lower" if cy > 2 / 3 else "middle"
+    return "center" if (v, h) == ("middle", "center") else f"{v} {h}"
+
+
 def _question(tag: dict[str, Any]) -> str:
     note = tag["note"].strip().rstrip(".?!")
     where = f"Around {tag['t']:.0f} seconds into this clip, a" if tag.get("t") is not None else "A"
-    return (f"{where} person reported: \"{note}\". Does the clip show this? "
-            "Answer YES only if it is clearly visible.")
+    look = ""
+    a = tag.get("area")
+    if a:
+        pc = lambda v: round(100 * v)  # noqa: E731
+        look = (f" Look specifically at the {area_words(a)} part of the frame "
+                f"({pc(a['x'])}% to {pc(a['x'] + a['w'])}% from the left, {pc(a['y'])}% to {pc(a['y'] + a['h'])}% from the top).")
+    return (f"{where} person reported: \"{note}\".{look} Does the clip show this"
+            f"{' there' if a else ''}? Answer YES only if it is clearly visible.")
 
 
 async def _clip_bytes(tag: dict[str, Any]) -> bytes:
