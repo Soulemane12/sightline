@@ -446,3 +446,10 @@ input[type=datetime-local]:focus { outline: none; border-color: var(--accent); }
 .by-you { color: var(--accent); font-weight: 600; }
 .tagbar select { flex: none; }
 .tag-item .open-inc { color: var(--accent); margin-top: 3px; }
+/* marker card under a timeline: what the clicked marker is */
+#markpop { position: fixed; z-index: 50; }
+.markcard { padding: 10px 12px; background: var(--pane-h); border: 1px solid var(--line-2); border-radius: 5px; font-size: 13px; box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55); }
+.markcard .mc-h { display: flex; align-items: center; gap: 8px; }
+.markcard .mc-h b { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.markcard .mc-x { margin-left: auto; }
+.markcard .mc-b { margin-top: 5px; color: var(--text-2); line-height: 1.45; }

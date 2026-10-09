@@ -40,6 +40,10 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _is_tombstone(p: Any) -> bool:
+    return isinstance(p, dict) and p.get("deleted") is True
+
+
 class Store:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
@@ -194,13 +198,16 @@ class Store:
     def get(self, kind: str, id: str) -> Any | None:
         with self._lock:
             entry = self._mem.get(kind, {}).get(id)
-            return None if not entry else entry.get("payload")
+            p = None if not entry else entry.get("payload")
+            return None if _is_tombstone(p) else p
 
     def list_kind(self, kind: str, *, source_id: str | None = None) -> list[Any]:
         with self._lock:
             out = []
             for entry in self._mem.get(kind, {}).values():
                 if source_id and entry.get("source_id") != source_id:
+                    continue
+                if _is_tombstone(entry.get("payload")):
                     continue
                 out.append(entry.get("payload"))
             return out
@@ -231,6 +238,10 @@ class Store:
                 }
             )
         self._write_tmp()
+
+    def tombstone(self, kind: str, id: str, *, source_id: str = "") -> None:
+        """Delete that survives a restart: VastDB is append-only, so write a deleted marker."""
+        self.put(kind, id, {"id": id, "source_id": source_id, "deleted": True, "deleted_at": _now_iso()}, source_id=source_id)
 
     def delete_local(self, kind: str, id: str) -> None:
         """Memory-only delete (append-only VastDB keeps history)."""

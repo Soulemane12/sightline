@@ -182,16 +182,7 @@ async def _check(tag_id: str) -> None:
     if tag:
         store.put("tag", tag_id, {**tag, "check": {**check, "at": _now(), "by": "Cosmos (direct look)"}},
                   source_id=tag["source_id"])
-        inc = store.get("incident", tag.get("incident_id") or "")
-        if inc:
-            inv = dict(inc.get("investigation") or {})
-            if check.get("verdict"):
-                inv["verdict"] = LOOK_VERDICT.get(check["verdict"], "unclear")
-                inv["second_look"] = {"verdict": check["verdict"], "text": check.get("text") or ""}
-            else:
-                inv["counter_evidence"] = check.get("text") or ""
-            store.put("incident", inc["id"], {**inc, "investigation": inv, "confidence": _confidence(tag, check)},
-                      source_id=tag["source_id"])
+        _apply_check(store.get("tag", tag_id), check)
 
 
 @router.post("/api/tags")
@@ -212,8 +203,46 @@ async def api_tag_create(body: TagIn) -> dict[str, Any]:
     return tag
 
 
+def _apply_check(tag: dict[str, Any], check: dict[str, Any]) -> None:
+    store = get_store()
+    inc = store.get("incident", tag.get("incident_id") or "")
+    if not inc:
+        return
+    inv = dict(inc.get("investigation") or {})
+    if check.get("verdict"):
+        inv["verdict"] = LOOK_VERDICT.get(check["verdict"], "unclear")
+        inv["second_look"] = {"verdict": check["verdict"], "text": check.get("text") or ""}
+    elif check.get("text"):
+        inv["counter_evidence"] = check["text"]
+    store.put("incident", inc["id"], {**inc, "investigation": inv, "confidence": _confidence(tag, check)},
+              source_id=tag["source_id"])
+
+
+def backfill_incidents() -> int:
+    """Tags made before tags raised incidents get their incident now (keeping Cosmos's verdict)."""
+    store = get_store()
+    n = 0
+    for tag in store.list_kind("tag"):
+        if not tag or tag.get("incident_id") or not tag.get("note") or not tag.get("source_id"):
+            continue
+        src = store.get("source", tag["source_id"])
+        if not src or src.get("status") == "unconfigured":
+            continue
+        inc = _incident(tag)
+        tag = {**tag, "incident_id": inc["id"]}
+        store.put("tag", tag["id"], tag, source_id=tag["source_id"])
+        store.put("incident", inc["id"], {**inc, "created_at": tag.get("created_at") or inc["created_at"]},
+                  source_id=tag["source_id"])
+        if (tag.get("check") or {}).get("status") in ("done", "skipped"):
+            _apply_check(tag, tag["check"])
+        _sync_upload_count(tag["source_id"])
+        n += 1
+    return n
+
+
 @router.get("/api/tags")
 async def api_tags(source_id: Optional[str] = Query(None)) -> list[dict[str, Any]]:
+    backfill_incidents()
     tags = [t for t in get_store().list_kind("tag", source_id=source_id) if t]
     return sorted(tags, key=lambda t: (t.get("t") if t.get("t") is not None else (t.get("frac") or 0)))
 
@@ -223,9 +252,9 @@ async def api_tag_delete(tag_id: str) -> dict[str, Any]:
     """Removes the tag and the incident it raised."""
     store = get_store()
     tag = store.get("tag", tag_id) or {}
-    store.delete_local("tag", tag_id)
+    store.tombstone("tag", tag_id, source_id=tag.get("source_id") or "")
     if tag.get("incident_id"):
-        store.delete_local("incident", tag["incident_id"])
+        store.tombstone("incident", tag["incident_id"], source_id=tag.get("source_id") or "")
     if tag.get("source_id"):
         _sync_upload_count(tag["source_id"])
     return {"ok": True, "id": tag_id}

@@ -191,9 +191,9 @@ function timelineHTML(src, incs, tags) {
     return `<span class="tl-clip ${done ? 'done' : ''}" style="left:calc(${(a * 100).toFixed(2)}% + 1px);width:calc(${((b - a) * 100).toFixed(2)}% - 2px)"></span>`;
   }).join('');
   const marks = incs.filter(i => i.replay_pos != null).map(i =>
-    `<span class="tl-mark ${esc(i.severity)}" style="left:${(i.replay_pos * 100).toFixed(2)}%" data-nav="/incident/${enc(i.id)}" title="${esc(i.title)} · ${esc(SEV_LABEL[i.severity] || '')} · ${pct(i.confidence && i.confidence.value)}"></span>`).join('');
+    `<span class="tl-mark ${esc(i.severity)}" style="left:${(i.replay_pos * 100).toFixed(2)}%" data-action="mark-info" data-kind="incident" data-id="${esc(i.id)}" data-frac="${esc(i.replay_pos)}" title="${esc(i.title)} · ${esc(SEV_LABEL[i.severity] || '')} · ${pct(i.confidence && i.confidence.value)}"></span>`).join('');
   const tagMarks = (tags || []).filter(t => t.frac != null).map(t =>
-    `<span class="tl-mark tag" style="left:${(t.frac * 100).toFixed(2)}%" data-action="tag-open" data-id="${esc(src.id)}" data-frac="${esc(t.frac)}" ${areaAttrs(t.area, t.note)} title="Your tag · ${esc(t.note)}"></span>`).join('');
+    `<span class="tl-mark tag" style="left:${(t.frac * 100).toFixed(2)}%" data-action="mark-info" data-kind="tag" data-id="${esc(t.id)}" data-frac="${esc(t.frac)}" ${areaAttrs(t.area, t.note)} title="Your tag · ${esc(t.note)}"></span>`).join('');
   return `<div class="tl">
       <div class="tl-labels"><div class="tl-l ruler-l">${segSec ? 'TC' : 'SEG'}</div><div class="tl-l">Footage</div><div class="tl-l">Markers</div></div>
       <div class="tl-lanes" data-scrub="${esc(src.id)}" title="Click or drag to scrub through this camera's footage">
@@ -208,7 +208,7 @@ function timelineHTML(src, incs, tags) {
         ${S.scrub && S.scrub.id === src.id ? `<div class="scrubhead" style="left:${(S.scrub.frac * 100).toFixed(2)}%"><span>${esc(scrubLabel(src, S.scrub.frac))}</span></div>` : ''}
       </div>
     </div>
-    <div class="tl-foot">${r && r.active ? `Archive replay ${esc(r.speed || '')}× · segment ${esc(r.segment)}/${esc(total)} · ` : ''}click or drag the timeline to scrub · click a marker to open its incident</div>`;
+    <div class="tl-foot">${r && r.active ? `Archive replay ${esc(r.speed || '')}× · segment ${esc(r.segment)}/${esc(total)} · ` : ''}click or drag the timeline to scrub · click a marker to see what it is</div>`;
 }
 
 function scrubLabel(src, frac) {
@@ -664,6 +664,7 @@ VIEWS.overview = {
     const n = mine.length;
     setHTML($('#ov-report', main), `<button class="btn primary" data-nav="/report?${esc(filterQuery(S.filter))}"${n ? '' : ' disabled'}>Build report from ${n === 1 ? 'this incident' : `these ${n} incidents`}</button>`);
     if (!DRAG) setHTML($('#ov-timeline', main), timelineHTML(src, mine, tags));
+    if (S.markSel && S.markSel.kind !== 'upload') { if (S.markSel.src === src.id) showMarkPop(markInfo(S.markSel)); else closeMarkPop(); }
     syncOvHead();
   },
 };
@@ -1245,6 +1246,8 @@ VIEWS.new = {
     const dur = f.duration || up.duration || 1;
     const marks = v.markers || [];
     S.fresh.dur = dur;
+    S.fresh.marks = marks;
+    if (S.markSel && S.markSel.kind === 'upload' && S.markSel.src === f.sid) showMarkPop(markInfo(S.markSel));
     setHTML($('#nf-markers'), clipTimelineHTML(dur, v.windows || [], marks, up.status === 'done'));
     syncClipHead();
     const cl = v.classification, pf = v.profile || {};
@@ -1277,7 +1280,7 @@ function clipTimelineHTML(dur, windows, marks, analyzed) {
     const a = Math.max(0, w.t_start / dur), b = Math.min(1, (w.t_end ?? w.t_start) / dur);
     return `<span class="tl-clip ${analyzed ? 'done' : ''}" style="left:calc(${(a * 100).toFixed(2)}% + 1px);width:calc(${(Math.max(0.005, b - a) * 100).toFixed(2)}% - 2px)" title="${esc(fmtT(w.t_start))}–${esc(fmtT(w.t_end))}"></span>`;
   }).join('');
-  const mk = marks.map(m => `<span class="tl-mark ${esc(m.status === 'tagged' ? 'tag' : m.status === 'incident' ? (m.severity || 'medium') : 'low')}" style="left:${Math.min(100, 100 * (m.t || 0) / dur).toFixed(2)}%;${m.status === 'rejected' ? 'opacity:.35;' : ''}" data-action="nf-seek" data-t="${esc(m.t_start ?? m.t)}" ${areaAttrs(m.area, m.title)} title="${esc(fmtT(m.t))} · ${esc(m.title)} · ${esc(m.status === 'tagged' ? 'your tag' : m.status)}${m.confidence != null ? ' · ' + pct(m.confidence) : ''}"></span>`).join('');
+  const mk = marks.map((m, i) => `<span class="tl-mark ${esc(m.status === 'tagged' ? 'tag' : m.status === 'incident' ? (m.severity || 'medium') : 'low')}" style="left:${Math.min(100, 100 * (m.t || 0) / dur).toFixed(2)}%;${m.status === 'rejected' ? 'opacity:.35;' : ''}" data-action="mark-info" data-kind="upload" data-i="${i}" data-t="${esc(m.t_start ?? m.t)}" ${areaAttrs(m.area, m.title)} title="${esc(fmtT(m.t))} · ${esc(m.title)} · ${esc(m.status === 'tagged' ? 'your tag' : m.status)}${m.confidence != null ? ' · ' + pct(m.confidence) : ''}"></span>`).join('');
   const n = { incident: 0, tagged: 0 };
   marks.forEach(m => { if (n[m.status] != null) n[m.status]++; });
   return `<div class="tl" style="margin-top:8px">
@@ -1289,8 +1292,70 @@ function clipTimelineHTML(dur, windows, marks, analyzed) {
         <div class="playhead" id="nf-head" style="left:0%"></div>
       </div>
     </div>
-    <div class="tl-foot">Uploaded clip · <span id="nf-tc">${esc(fmtClipT(0, dur))}</span> / ${esc(fmtClipT(dur, dur))} · ${wins.length} analysis windows · ${n.incident} incident(s) · ${n.tagged} tag(s) · click or drag the timeline to scrub · click a marker to jump to it</div>`;
+    <div class="tl-foot">Uploaded clip · <span id="nf-tc">${esc(fmtClipT(0, dur))}</span> / ${esc(fmtClipT(dur, dur))} · ${wins.length} analysis windows · ${n.incident} incident(s) · ${n.tagged} tag(s) · click or drag the timeline to scrub · click a marker to see what it is</div>`;
 }
+// ----- marker card: what a timeline marker is, without leaving the page
+function markCardHTML(m) {
+  if (!m) return '';
+  return `<div class="markcard">
+    <div class="mc-h">${m.sev ? sevPill(m.sev) : `<span class="tag">${esc(m.kindLabel)}</span>`}<b>${esc(m.title)}</b>
+      <span class="mono muted">${esc(m.when || '')}${m.conf != null ? ' · ' + pct(m.conf) : ''}</span>
+      <button class="linkbtn mc-x" data-action="markcard-close" title="Close">✕</button></div>
+    <div class="mc-b">${m.who ? `<span class="${m.manual ? 'by-you' : 'muted'}">${esc(m.who)}</span>` : ''}${m.detail ? ` <span>${esc(m.detail)}</span>` : ''}</div>
+    ${m.check ? `<div class="mc-b">${m.check}</div>` : ''}
+    ${m.incident_id ? `<div class="btn-row" style="margin-top:8px"><button class="btn primary" data-action="go" data-to="/incident/${esc(m.incident_id)}">Open incident →</button></div>` : ''}
+  </div>`;
+}
+/** Popover just above the clicked marker; stays put while the page refreshes underneath it. */
+function showMarkPop(info, rect) {
+  let pop = $('#markpop');
+  if (!info) { closeMarkPop(); return; }
+  if (!pop) { pop = document.createElement('div'); pop.id = 'markpop'; document.body.appendChild(pop); }
+  setHTML(pop, markCardHTML(info));
+  if (rect) {
+    const w = Math.min(420, window.innerWidth - 24);
+    pop.style.width = w + 'px';
+    pop.style.left = Math.max(12, Math.min(window.innerWidth - w - 12, rect.left + rect.width / 2 - w / 2)) + 'px';
+    pop.style.bottom = (window.innerHeight - rect.top + 10) + 'px';
+  }
+}
+function closeMarkPop() { S.markSel = null; const p = $('#markpop'); if (p) p.remove(); }
+document.addEventListener('pointerdown', e => {
+  if ($('#markpop') && !e.target.closest('#markpop') && !e.target.closest('.tl-mark')) closeMarkPop();
+}, true);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeMarkPop(); });
+window.addEventListener('resize', closeMarkPop);
+document.addEventListener('scroll', e => { if (e.target && e.target.closest && !e.target.closest('#markpop')) closeMarkPop(); }, true);
+window.addEventListener('hashchange', closeMarkPop);
+
+function incidentCard(inc, extra) {
+  const inv = inc.investigation || {};
+  const ev = (inc.evidence || []).find(e => e.role === 'event') || {};
+  return { sev: inc.severity, title: inc.title, when: fmtTC(inc.peak_at ?? inc.started_at), conf: inc.confidence && inc.confidence.value,
+    who: inc.origin === 'manual' ? 'Reported by you' : `Raised by Sightline${inv.verdict ? ' · ' + inv.verdict.replace('_', ' ') : ''}`, manual: inc.origin === 'manual',
+    detail: inv.why_flagged || inc.summary || String(ev.caption || '').slice(0, 220), incident_id: inc.id, ...(extra || {}) };
+}
+function markInfo(d) {
+  if (d.kind === 'upload') {
+    const m = ((S.fresh && S.fresh.marks) || [])[Number(d.i)];
+    if (!m) return null;
+    const inc = m.incident_id && S.incidents.find(i => i.id === m.incident_id);
+    if (inc) return incidentCard(inc, m.status === 'tagged' ? { check: tagCheckHTML(m.check) } : null);
+    return { kindLabel: m.status === 'tagged' ? 'Your tag' : cap(m.status), title: m.title, when: `${fmtT(m.t_start)}–${fmtT(m.t_end)}`, conf: m.confidence,
+      who: m.status === 'rejected' ? 'Sightline looked and decided this was not an incident' : m.status === 'tagged' ? 'Tagged by you' : 'Candidate moment',
+      manual: m.status === 'tagged', check: m.status === 'tagged' ? tagCheckHTML(m.check) : '' };
+  }
+  if (d.kind === 'tag') {
+    const tg = (S.tags[S.selected] || []).find(t => t.id === d.id);
+    if (!tg) return null;
+    const inc = tg.incident_id && S.incidents.find(i => i.id === tg.incident_id);
+    return inc ? incidentCard(inc, { check: tagCheckHTML(tg.check) })
+      : { kindLabel: 'Your tag', title: tg.note, who: 'Tagged by you', manual: true, check: tagCheckHTML(tg.check) };
+  }
+  const inc = S.incidents.find(i => i.id === d.id);
+  return inc ? incidentCard(inc) : null;
+}
+
 function syncOvHead() {
   const w = S.ovWatch, head = $('#ov-head');
   if (!w || !head || DRAG) return;
@@ -1680,6 +1745,15 @@ const ACTIONS = {
   },
   'tag-area': el => startAreaDraw(el.closest('form')),
   'go': el => nav(el.dataset.to),
+  'mark-info': async el => {
+    const d = el.dataset, upload = d.kind === 'upload';
+    S.markSel = { ...d, src: upload ? (S.fresh && S.fresh.sid) : S.selected };
+    showMarkPop(markInfo(d), el.getBoundingClientRect());
+    if (upload) { ACTIONS['nf-seek'](el); return; }
+    await scrubCommit(S.selected, Number(d.frac) || 0);
+    if (d.area) showArea($('#ov-player video'), JSON.parse(d.area), d.note);
+  },
+  'markcard-close': () => closeMarkPop(),
   'nf-open': el => { S.fresh = { sid: el.dataset.sid }; VIEWS.new.showPreview($('#main')); },
   'live-start': () => VIEWS.live.start(),
   'live-stop': () => VIEWS.live.stop(),

@@ -143,3 +143,35 @@ def test_upload_tag_incident_plays_from_the_file_and_counts(monkeypatch):
         await routes_tags.api_tag_delete(tag["id"])
         assert st.get("source", "upload-x")["upload"]["incidents"] == 0
     asyncio.run(go())
+
+
+def test_old_tags_become_incidents_with_their_verdict(monkeypatch):
+    st = _store(monkeypatch)
+    st.put("source", "nyc_streets_cam-2", {"id": "nyc_streets_cam-2", "status": "monitoring"}, source_id="nyc_streets_cam-2")
+    st.put("tag", "tag-old", {"id": "tag-old", "source_id": "nyc_streets_cam-2", "note": "people jay walking",
+                              "segment": "s3://x/seg.mp4", "t_start": 0.0, "t_end": 5.0, "frac": 0.5,
+                              "check": {"status": "done", "verdict": "YES", "text": "Pedestrians cross mid-block."}},
+           source_id="nyc_streets_cam-2")
+    st.put("tag", "tag-gone", {"id": "tag-gone", "source_id": "removed-cam", "note": "x"}, source_id="removed-cam")
+    assert routes_tags.backfill_incidents() == 1 and routes_tags.backfill_incidents() == 0
+    inc = st.get("incident", st.get("tag", "tag-old")["incident_id"])
+    assert inc["origin"] == "manual" and inc["investigation"]["verdict"] == "confirmed" and inc["confidence"]["value"] == 0.81
+
+
+def test_deleted_tag_stays_deleted_after_restart(monkeypatch):
+    st = _store(monkeypatch)
+    st.put("source", "cam-a", {"id": "cam-a", "status": "monitoring"}, source_id="cam-a")
+
+    async def go():
+        tag = await routes_tags.api_tag_create(routes_tags.TagIn(source_id="cam-a", note="near miss", segment="s", frac=0.1))
+        for t in list(routes_tags._TASKS):
+            t.cancel()
+        await routes_tags.api_tag_delete(tag["id"])
+        return tag
+    tag = asyncio.run(go())
+    snap = st.export_snapshot()        # what a restart hydrates from (append-only history)
+    st2 = Store()
+    st2._tmp_path = Path(tempfile.mkdtemp()) / "s2.json"
+    st2.import_snapshot(snap)
+    assert st2.get("tag", tag["id"]) is None and st2.get("incident", tag["incident_id"]) is None
+    assert not st2.list_kind("tag") and not st2.list_incidents(source_id="cam-a")
