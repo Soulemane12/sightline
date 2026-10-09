@@ -71,9 +71,9 @@ Official repo HEAD at recon: `0c6b756` (matches planning pin). Skills layout mat
 
 | # | Unknown | Why | How | Fallback | Answer |
 |---|---|---|---|---|---|
-| B1 | Wall time for a 1-chunk re-ingest | demo timing, R2 start time | R1 stopwatch | assume 20 min | **Deferred** (no re-ingest in P1). |
-| B2 | Does the detailed (sectioned) prompt get followed? Is the FLAGS line present? | `caption_flag` primitive | R1 caption diff | baseline prose prompt; caption_terms only | **Deferred** (R1). |
-| B3 | Does job status expose progress fields as documented? | stepper UI | R1 polling | dashboard `pipeline_alignment` | **Deferred** (R1). |
+| B1 | Wall time for a 1-chunk re-ingest | demo timing, R2 start time | R1 stopwatch | assume 20 min | **R1 incomplete after 40.1 min.** Accept 0.34s; S3 copy of 2 segs immediate; `pending_index` stuck at **2**; captions never replaced. **Do not assume <20 min.** |
+| B2 | Does the detailed (sectioned) prompt get followed? Is the FLAGS line present? | `caption_flag` primitive | R1 caption diff | baseline prose prompt; caption_terms only | **Unknown / not yet.** Captions unchanged vs snapshot at +40 min; cannot verify FLAGS/SCENE yet. Prompt used was Sightline-generated (563 chars, Nemotron Ultra). |
+| B3 | Does job status expose progress fields as documented? | stepper UI | R1 polling | dashboard `pipeline_alignment` | **Partial / flaky.** Status shape includes `status, completed_chunks, total_chunks, indexed_segments, total_segments, chunks[]`. But GET often **404** (`Re-ingest job not found (backend may have restarted)`) interleaved with `status=running`. Prefer `pipeline_alignment.pending_index` + `tools/segments` caption diff as ground truth. |
 | B4 | Upload size limit and allowed types | new-footage lane | `GET /api/v1/config` | ≤ 25 MB clips | **`app.max_upload_size_mb`: 100**. Fixture `config.json` (secrets redacted). |
 | B5 | Upload → indexed latency for a 20–30 s clip | new-footage demo beat | test upload of a staged clip (is_public false) | show plan + prompt only | **Not tested** in P1 (no upload yet). |
 | B6 | Can an uploaded video get our custom_prompt (and does it show in captions)? | "prompt before indexing" story | B5 test | scenario preset | **Not tested** in P1. |
@@ -133,3 +133,30 @@ Official repo HEAD at recon: `0c6b756` (matches planning pin). Skills layout mat
 ## P2 hello deploy
 - Deployed `sightline` via ConfigMap (no Docker). Rollout ~50s. `/app/health` 200; `/api/probe` all-green with in-cluster VSS.
 - `scripts/gen_prompt.py sdg_warehouse_cam-2` → Nemotron Ultra, **563 chars** Cosmos prompt (FLAGS + forklift motion/proximity).
+
+## R1 re-ingest (early chunk de-risk) — 2026-10-09
+
+**Target (ONLY):** `…ceiling_04.rgb_chunk_0000.mp4`  
+`s3://team-22-vss-chunks/team-22/20261001_075529_16face5576497e69c190_03a2937960b9e61f1c99_run_7_seed_900334964.ceiling_04.rgb_chunk_0000.mp4`  
+**NOT touched:** demo-reserved `…eye_00.rgb_chunk_0000.mp4`
+
+| Milestone | UTC | Δ from start |
+|---|---|---:|
+| Snapshot before | 2026-10-09T15:55:09Z | — |
+| Wall start / POST | 2026-10-09T15:55:36.72Z | 0 |
+| Request accepted (`job_id` returned) | 2026-10-09T15:55:37.07Z | **0.34 s** |
+| Segments copied to staging (`copied_segments=2`) | same response | ~0.3 s |
+| Captions replaced | — | **never (by +40.1 min)** |
+| Searchable new description | — | **never (by +40.1 min)** |
+| Job `completed` | — | **never**; intermittent 404 / `running` 0/2 |
+| Observation stop | 2026-10-09T16:35:42Z | **2406 s (~40.1 min)** |
+
+**API behavior**
+- `POST /api/v1/dashboard/reingest` with `chunk_count:1` + `custom_prompt` (563 chars, Sightline/W&B) → **200**, `job_id=37e6aa00f49746a99ec073aef791d5a6`, staging URIs under `…/segments/reingest/<job_id>/…`.
+- `GET /api/v1/dashboard/reingest/<job_id>` → often **404** (“backend may have restarted”) alternating with `status=running`, `indexed_segments=0/2`.
+- Ground truth: `pipeline_alignment.pending_index` stayed **2**; `healthy=false`; `tools/segments` captions **identical** to pre-snapshot.
+- Demo-reserved `eye_00` still 2 segments, unchanged.
+
+**Live-demo verdict:** **NOT reliable for judging.** Accept is instant, but indexing did not finish in 40+ minutes. For demos: show a job “in progress” / Analysis Evolution from the pre-snapshot, or only Approve re-ingest if `pending_index` is already draining. Prefer R2 only after this backlog clears.
+
+Fixtures (gitignored): `fixtures/snapshot_ceiling_04_rgb_chunk_0000.json`, `fixtures/r1_timing.json`.
