@@ -87,10 +87,16 @@ class Settings:
     app_dir: str = field(default_factory=lambda: os.path.dirname(os.path.abspath(__file__)))
 
 
+# Documented in-pod ClusterIP (set via Secret VSS_URL). Never hardcode as the only URL —
+# on the VM fall back to INGRESS_URL; inside the pod public Ingress DNS fails.
+IN_POD_VSS_URL = "http://video-backend-service:8000"
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Load settings once. VSS_URL stays configurable (in-pod ClusterIP vs VM Ingress)."""
     ingress = _env("INGRESS_URL").rstrip("/")
+    # Prefer explicit VSS_URL (pod Secret should be IN_POD_VSS_URL); else VM Ingress.
     vss = _env("VSS_URL").rstrip("/") or ingress
     return Settings(
         port=_env_int("PORT", 8080),

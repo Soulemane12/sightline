@@ -152,14 +152,23 @@ class VSSClient:
             params["date"] = date
         return await self._json("GET", "/api/v1/videos/explore", params=params) or {"videos": [], "total": 0}
 
+    @staticmethod
+    def explore_parent_rows(page: dict[str, Any]) -> list[dict[str, Any]]:
+        """Parents from explore: key is `videos`; `chunks` only as defensive alias."""
+        if "videos" in page:
+            return list(page.get("videos") or [])
+        if "chunks" in page:
+            return list(page.get("chunks") or [])
+        return []
+
     async def explore_all(self, *, scope: str = "all", page_size: int = 48) -> list[dict[str, Any]]:
-        """Page through explore until exhausted. List key is `videos` (alias `chunks`)."""
+        """Page through explore until exhausted. Primary key `videos` (alias `chunks`)."""
         out: list[dict[str, Any]] = []
         offset = 0
         total: int | None = None
         while True:
             page = await self.explore(scope=scope, limit=page_size, offset=offset)
-            rows = page.get("videos") or page.get("chunks") or []
+            rows = self.explore_parent_rows(page)
             if total is None:
                 total = int(page.get("total") or 0)
             out.extend(rows)
@@ -167,6 +176,20 @@ class VSSClient:
             if not rows or (total is not None and offset >= total) or len(rows) < page_size:
                 break
         return out
+
+    async def max_upload_size_mb(self, default: int = 100) -> int:
+        """Live limit from GET /api/v1/config → app.max_upload_size_mb (recon: 100)."""
+        try:
+            cfg = await self.app_config()
+            app = cfg.get("app") if isinstance(cfg, dict) else None
+            if isinstance(app, dict) and app.get("max_upload_size_mb") is not None:
+                return int(app["max_upload_size_mb"])
+            # Some payloads put it at top level
+            if isinstance(cfg, dict) and cfg.get("max_upload_size_mb") is not None:
+                return int(cfg["max_upload_size_mb"])
+        except Exception as e:  # noqa: BLE001
+            log.info("app_config upload limit unavailable: %s", type(e).__name__)
+        return default
 
     async def tools_segments(self, original_video: str) -> dict[str, Any]:
         return (

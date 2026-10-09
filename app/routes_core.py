@@ -65,7 +65,10 @@ def _classification_brief(c: dict[str, Any] | None) -> dict[str, Any] | None:
 async def api_status() -> dict[str, Any]:
     settings = get_settings()
     store = get_store()
-    vss_ok, vss_detail = await get_vss().health_ok()
+    vss = get_vss()
+    vss_ok, vss_detail = await vss.health_ok()
+    # Live upload limit from VSS /api/v1/config → app.max_upload_size_mb (recon: 100).
+    upload_mb = await vss.max_upload_size_mb(default=settings.upload_mb)
     try:
         gpu = await get_gpu().health()
         gpu_d = gpu.model_dump()
@@ -96,7 +99,7 @@ async def api_status() -> dict[str, Any]:
             sports=settings.sports_enabled,
         ),
         replay={"speed": settings.replay_speed},
-        limits={"upload_mb": settings.upload_mb},
+        limits={"upload_mb": upload_mb},
         stats={
             "candidates": len(events),
             "rejected": sum(1 for e in events if (e or {}).get("status") == "rejected"),

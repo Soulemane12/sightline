@@ -65,6 +65,37 @@ def test_evidence_angle_fields_preserved():
     assert d["camera_view"] == "ceiling_04"
 
 
+def test_explore_videos_primary_chunks_alias():
+    from vss_client import VSSClient
+
+    assert VSSClient.explore_parent_rows({"videos": [{"a": 1}], "chunks": [{"b": 2}]}) == [{"a": 1}]
+    assert VSSClient.explore_parent_rows({"videos": []}) == []
+    assert VSSClient.explore_parent_rows({"chunks": [{"b": 2}]}) == [{"b": 2}]
+
+
+def test_no_captured_at_on_video_ref():
+    from models import video_ref_from_explore
+
+    ref = video_ref_from_explore(
+        {
+            "original_video": "s3://p",
+            "filename": "f.mp4",
+            "upload_timestamp": "2026-10-01T00:00:00",
+            "captured_at": "DO-NOT-USE",
+            "total_segments": 2,
+        }
+    )
+    dumped = ref.model_dump()
+    assert "captured_at" not in dumped
+    assert dumped["uploaded_at"] == "2026-10-01T00:00:00"
+
+
+def test_frame_diagonal():
+    from repository import VideoRepository
+
+    assert abs(VideoRepository.frame_diagonal((1080, 1920)) - (1080**2 + 1920**2) ** 0.5) < 1e-6
+
+
 def test_object_counts_bad_json():
     from models import VideoSegment
 
@@ -121,6 +152,9 @@ if __name__ == "__main__":
     test_from_vss_segment_mapping()
     test_parse_run_seed_view()
     test_evidence_angle_fields_preserved()
+    test_explore_videos_primary_chunks_alias()
+    test_no_captured_at_on_video_ref()
+    test_frame_diagonal()
     test_object_counts_bad_json()
     test_live_smoke()
     print("OK")

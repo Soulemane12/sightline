@@ -16,10 +16,8 @@ from typing import Any, Optional
 from models import (
     DetectionSummary,
     Evidence,
-    VideoRef,
     VideoSegment,
     VideoSource,
-    parse_flags,
     video_ref_from_explore,
 )
 from vss_client import VSSClient, get_vss
@@ -244,13 +242,23 @@ class VideoRepository:
         return seg
 
     def bbox_frames(self, source_uri: str) -> list[dict[str, Any]]:
-        """Pixel-xyxy frame detections for rules.bbox_proximity (from cache)."""
+        """Cached pixel-xyxy frame detections for rules.bbox_proximity.
+
+        Each frame: {frame_index, time_sec, detections:[{label, confidence, bbox:[x1,y1,x2,y2]}]}.
+        Gaps must be normalized by frame diagonal (H²+W²)^0.5 — never invent captured_at.
+        """
         raw = self._detections.get(source_uri)
         if not raw:
             return []
         return list(raw.get("frames") or [])
 
+    async def ensure_bbox_frames(self, source_uri: str) -> list[dict[str, Any]]:
+        """Fetch sidecar if needed, then return preserved per-frame pixel xyxy boxes."""
+        await self.get_detections_raw(source_uri)
+        return self.bbox_frames(source_uri)
+
     def video_shape(self, source_uri: str) -> tuple[int, int] | None:
+        """(H, W) from sidecar for bbox_proximity diagonal normalization."""
         raw = self._detections.get(source_uri)
         if not raw:
             return None
@@ -258,6 +266,13 @@ class VideoRepository:
         if isinstance(shape, (list, tuple)) and len(shape) >= 2:
             return int(shape[0]), int(shape[1])
         return None
+
+    @staticmethod
+    def frame_diagonal(video_shape: tuple[int, int] | None) -> float:
+        if not video_shape:
+            return 1.0
+        h, w = video_shape
+        return float((h * h + w * w) ** 0.5) or 1.0
 
     async def _ensure_explore_index(self) -> dict[str, dict[str, Any]]:
         if self._explore_index is None:
