@@ -149,6 +149,11 @@ def parse_second_look(text: str) -> Optional[SecondLook]:
     return SecondLook(verdict=m.group(1).upper(), text=(w.group(1).strip() if w else "")[:300])
 
 
+def second_look_question(objective: MonitoringObjective) -> str:
+    what = (objective.description or objective.name or objective.id).strip().rstrip(".")
+    return f"Does this clip show the following: {what}? Answer YES only if it is clearly visible."
+
+
 def combine_confidence(parts: dict[str, tuple[float | None, str]]) -> Confidence:
     """Weighted average over the components that are available (value not None)."""
     comps: list[ConfidenceComponent] = []
@@ -440,8 +445,9 @@ class InvestigationEngine:
         ev_seg = segs[idx]
 
         # 2) other angles, 3) related moments, 4) second look (in parallel)
-        question = (objective.investigation_questions[0] if objective.investigation_questions
-                    else f"Is {objective.description or objective.name} visible in this clip?")
+        # Second look must be a confirmation question (YES = the objective is visible). Using an
+        # investigation question like "Was the forklift moving?" would invert the meaning of NO.
+        question = second_look_question(objective)
         probe = objective.semantic_probes[0] if objective.semantic_probes else objective.name
         # Prefer parent original_video from the segment (always present on VideoSegment)
         parent_ov = ev_seg.original_video or hint_video or ""

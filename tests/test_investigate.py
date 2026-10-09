@@ -292,3 +292,12 @@ def test_unknown_segment_is_rejected():
 
 def test_investigate_response_model_accepts_llm_shape():
     InvestigateLLMResponse.model_validate(CONFIRMED)
+
+
+def test_second_look_asks_a_confirmation_question():
+    from models import MonitoringObjective
+    o = MonitoringObjective(id="x", name="Worker / forklift proximity", description="A person within close range of a moving forklift.",
+                            investigation_questions=["Was the forklift moving?"])
+    q = inv.second_look_question(o)
+    assert q.startswith("Does this clip show the following: A person within close range of a moving forklift?")
+    assert "Was the forklift moving" not in q

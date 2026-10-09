@@ -225,7 +225,12 @@ function renderTop() {
   html += chip('VastDB', st.state ? state.backend === 'vastdb' : null, state.backend === 'vastdb' ? 'Sightline state persisted in VastDB (schema "sightline")' : 'State is local only');
   setHTML($('#health'), html);
   const page = { overview: 'monitor', source: 'monitor', incident: 'monitor', search: 'search', new: 'new', live: 'live' }[S.route.name];
-  document.querySelectorAll('#pages button').forEach(b => b.classList.toggle('active', b.dataset.page === page));
+  const flags = st.flags || {};
+  const shown = { new: MOCK || !!flags.upload, live: MOCK || !!flags.live };
+  document.querySelectorAll('#pages button').forEach(b => {
+    b.classList.toggle('active', b.dataset.page === page);
+    if (b.dataset.page in shown) b.hidden = !shown[b.dataset.page];  // hide features disabled on this deployment
+  });
 }
 
 function renderSidebar() {
