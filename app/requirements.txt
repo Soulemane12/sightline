@@ -1,0 +1,5 @@
+fastapi==0.115.6
+uvicorn==0.34.0
+httpx==0.28.1
+vastdb==2.1.0
+pyarrow==23.0.1

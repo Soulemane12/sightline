@@ -2,11 +2,14 @@
 
 QA fills the **Answer** column during P1/P2. The lead writes decisions at the top. Anything still blank at 10:30 gets its fallback by default.
 
-## Decisions
-- **D1 (10:00) primary source:** `sdg_warehouse_cam-2` (warehouse3 / warehouse; worker ↔ forklift; captions explicitly name forklift + person; search sim≈0.50–0.58)  **secondary:** `nyc_streets_cam-1` (new_york / streets; pedestrian ↔ car at crosswalk; search sim≈0.39)  **optional third:** `smartspace_cam-1` (indoor / crowds — little/no vehicle interaction; good “objective not applicable” proof)
-- **Reserved chunks:** early = TBD by lead (suggest one `sdg_warehouse_cam-2` ceiling/eye chunk with forklift+person, e.g. `…ceiling_04.rgb_chunk_0000`) · demo_reserved = TBD (leave a different warehouse chunk + one `nyc_streets_cam-1` chunk untouched)
-- **W&B model:** `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B` (fallback model: `meta-llama/Llama-3.3-70B-Instruct`; both support `response_format=json_object`, ~0.4–1.2 s)
-- **Differences from ARCHITECTURE.md found in recon:** see **P0b staleness** below; segment fields are `segment_start_sec`/`segment_end_sec`/`reasoning_content`/`object_classes` (not `t_start`/`caption`); explore list key is `chunks`; Cosmos model id is `nvidia/cosmos3-nano-reasoner`.
+## Decisions (LOCKED)
+- **D1 primary:** `sdg_warehouse_cam-2` / warehouse3
+- **D1 secondary:** `nyc_streets_cam-1` / new_york / streets
+- **D1 optional negative:** `smartspace_cam-1`
+- **Runtime overrides (locked):** Cosmos model `nvidia/cosmos3-nano-reasoner`; YOLO has **no forklift** (forklift = Cosmos/captions/LLM); W&B primary `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B`, fallback `meta-llama/Llama-3.3-70B-Instruct`; W&B calls need **User-Agent**
+- **Reserved chunks:** early = TBD by lead · demo_reserved = TBD
+- **In-pod VSS URL:** `http://video-backend-service:8000` (public Ingress hostname does **not** resolve inside pods)
+- **Differences from ARCHITECTURE.md:** see P0b; plus in-pod VSS must use ClusterIP Service, not `$INGRESS_URL`
 
 ## P0b staleness (doc → reality → fix)
 
@@ -26,6 +29,7 @@ QA fills the **Answer** column during P1/P2. The lead writes decisions at the to
 | S12 | ~8 GB RAM | **9.7 GiB** total; ~7.5 GiB available during P1 | Still cap concurrent agents; check `free -h` before 3rd seat |
 | S13 | YOLO has forklift class | COCO only — **no forklift** in `objects[]` / detections; captions still say “forklift” | Entity map: forklift → caption/LLM, not YOLO label |
 | S14 | App open via ingress URL | Skill: humans use **https://workshop.thecosmoslabs.com → App**; Ingress host `video-lab-team-22.cosmos.vastdata.com` path `/app` | Never demo via `$INGRESS_URL` |
+| S15 | Pod `VSS_URL=$INGRESS_URL` | Public host `video-lab-team-22.cosmos.vastdata.com` → DNS **Errno -5** in pod | Secret uses `http://video-backend-service:8000` |
 
 Official repo HEAD at recon: `0c6b756` (matches planning pin). Skills layout matches `.cursor/README.md`.
 
@@ -73,16 +77,16 @@ Official repo HEAD at recon: `0c6b756` (matches planning pin). Skills layout mat
 
 | # | Unknown | Why | How | Fallback | Answer |
 |---|---|---|---|---|---|
-| D1 | `/app` hello deploy works (namespace, ingress class, rewrite) | everything | P2 | port-forward demo | **Pending P2.** NS=`team-22`, host `video-lab-team-22.cosmos.vastdata.com`, path `/app` per skill. |
-| D2 | Pod egress: PyPI, W&B API, GPU endpoints, VSS from inside the pod | runtime deps | `/api/probe` | vendor-free stdlib server; call VSS by `INGRESS_URL` | **Pending P2 probe.** |
-| D3 | Pod startup time with requirements installed (with and without weave) | rollout speed | time P2 | drop weave | **Pending P2.** |
-| D4 | Is the page served over HTTPS **top-level** (not in an iframe without `allow="camera"`) when opened via the App button? | getUserMedia secure context | open the App button; check `location.href` on the hello page | Chrome insecure-origin flag for the origin used | **Pending P2** (needs laptop App button). |
-| D5 | Ingress annotations honored (body size, timeouts, buffering) | uploads, clip streaming | upload a 20 MB file to a test route | smaller uploads via VSS directly | **Pending P2.** |
-| D6 | Does the App button work from the laptop (Cloudflare Access login), and can judges reach it? | demo from laptop | open https://workshop.thecosmoslabs.com → App | demo in the VM browser; video | **Pending human check** after P2. |
+| D1 | `/app` hello deploy works (namespace, ingress class, rewrite) | everything | P2 | port-forward demo | **PASS.** `deploy/deploy.sh` → Deployment/Service/Ingress `sightline` in `team-22`; path `/app(/|$)(.*)`; rewrite `/$2`; curl `http://video-lab-team-22.cosmos.vastdata.com/app/health` → 200. Humans: workshop **App** button. |
+| D2 | Pod egress: PyPI, W&B API, GPU endpoints, VSS from inside the pod | runtime deps | `/api/probe` | vendor-free stdlib server; call VSS by `INGRESS_URL` | **PASS** with in-cluster VSS. Probe all-green: vss_login, cosmos_ready, yolo_healthz, wandb_models (20), vastdb_probe (rows=1). PyPI works (pip at start). Public `$INGRESS_URL` hostname fails DNS in-pod → use `video-backend-service:8000`. |
+| D3 | Pod startup time with requirements installed (with and without weave) | rollout speed | time P2 | drop weave | **~50–52 s** rollout wait (pip install fastapi/httpx/vastdb/pyarrow, no weave). Ready 1/1. |
+| D4 | Is the page served over HTTPS **top-level** (not in an iframe without `allow="camera"`) when opened via the App button? | getUserMedia secure context | open the App button; check `location.href` on the hello page | Chrome insecure-origin flag for the origin used | **Needs laptop check.** Hello page prints `location.href` + BASE. Cluster HTTP `/app` works; workshop App is the human HTTPS path. |
+| D5 | Ingress annotations honored (body size, timeouts, buffering) | uploads, clip streaming | upload a 20 MB file to a test route | smaller uploads via VSS directly | Annotations applied (`proxy-body-size 200m`, timeouts 120, buffering off). Upload stress **not** tested yet. |
+| D6 | Does the App button work from the laptop (Cloudflare Access login), and can judges reach it? | demo from laptop | open https://workshop.thecosmoslabs.com → App | demo in the VM browser; video | **Needs human.** Lead: open workshop → **App**. |
 | D7 | Do CDN scripts load in the viewer's browser? | frontend libs | no CDN needed by design | vanilla only | Design remains **vanilla / no CDN required**. |
-| D8 | VastDB custom tables work **from the VM** (create `sightline` schema, insert, select) | durable state + VAST story | P1 step 7 (`vast-database` skills) | seed_state.json | **Yes.** Created `sightline.probe` (id int64, note utf8); insert ~**0.09 s**; select read-back 1 row ~**0.17 s**. Never touched `vss-collection`. |
-| D12 | App button mechanics: new tab vs iframe, final URL, **path prefix**, request size and timeout limits through the portal | frontend `BASE`, uploads | hello page shows `location.href`; upload a test file | keep runtime `BASE`; smaller uploads | **Pending P2.** |
-| D13 | VastDB reachable **from inside the pod** (data VIP), and pod startup time with `vastdb` + `pyarrow` | store backend | `api/probe` in P2 | `/tmp` + seed store; drop pyarrow if startup > 90 s | VM reachability **confirmed**; in-pod **pending P2**. |
+| D8 | VastDB custom tables work **from the VM** (create `sightline` schema, insert, select) | durable state + VAST story | P1 step 7 (`vast-database` skills) | seed_state.json | **Yes.** Created `sightline.probe`; insert/select OK. **Also OK from pod** via `/api/probe`. |
+| D12 | App button mechanics: new tab vs iframe, final URL, **path prefix**, request size and timeout limits through the portal | frontend `BASE`, uploads | hello page shows `location.href`; upload a test file | keep runtime `BASE`; smaller uploads | **Needs laptop.** Hello page JS derives BASE from `location.pathname`. Cluster path prefix is `/app`. |
+| D13 | VastDB reachable **from inside the pod** (data VIP), and pod startup time with `vastdb` + `pyarrow` | store backend | `api/probe` in P2 | `/tmp` + seed store; drop pyarrow if startup > 90 s | **PASS.** In-pod select on `sightline.probe` ok (~0.3–0.4 s). Startup ~50 s with vastdb+pyarrow (< 90 s). |
 | D9 | Clipboard paste into the VM terminal works? | prompt sheet | try | "read BUILD_DAY_PLAN.md and run P#" | Used file-read prompts successfully this session. |
 | D10 | How many Cursor `agent` sessions fit on the 4 vCPU / 8 GB VM (RAM, credits)? | parallel seats | `free -h` with 2, then 3 sessions running | 3 seats (default); 2 if memory is tight | **4 vCPU / 9.7 GiB.** During P1 ~7.5 GiB available — start with **2** agents, add 3rd only if free stays >2.5 GiB. |
 | D11 | `gh` on the VM / GitHub push works | backups, submission | `gh auth status` | PAT | **`gh` missing** → use PAT / git credential for `origin` (`Soulemane12/sightline`). |
@@ -107,3 +111,7 @@ Official repo HEAD at recon: `0c6b756` (matches planning pin). Skills layout mat
 - **Recommended secondary:** `nyc_streets_cam-1` — pedestrian/crosswalk ↔ car/truck, clear captions + rich YOLO person/car boxes.
 - **Strongest clips:** warehouse forklift+person (sim≈0.51–0.58); NYC crosswalk pedestrians with vehicles (sim≈0.39); SF crosswalk near-miss-ish (sim≈0.29) as backup.
 - **Blockers for later:** no re-ingest yet (B1–B3); W&B clients need User-Agent; no system pip/venv (dev only); `gh` absent; YOLO cannot label forklifts; sports/retail not in index; P2 deploy / App-button HTTPS still open.
+
+## P2 hello deploy
+- Deployed `sightline` via ConfigMap (no Docker). Rollout ~50s. `/app/health` 200; `/api/probe` all-green with in-cluster VSS.
+- `scripts/gen_prompt.py sdg_warehouse_cam-2` → Nemotron Ultra, **563 chars** Cosmos prompt (FLAGS + forklift motion/proximity).
