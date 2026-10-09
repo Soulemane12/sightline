@@ -1,0 +1,12 @@
+# Real API responses and snapshots from the event (contain team URIs) — never commit
+fixtures/
+app/seed_state.json
+
+# Secrets — never commit
+.env
+.env.*
+*.config
+
+__pycache__/
+*.pyc
+.DS_Store
