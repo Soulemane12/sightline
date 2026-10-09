@@ -324,3 +324,5 @@ input[type=text]:focus, select:focus { outline: none; border-color: var(--accent
 .scrubhead { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: #fff; z-index: 3; pointer-events: none; box-shadow: 0 0 0 1px rgba(0,0,0,.5); }
 .scrubhead span { position: absolute; top: 3px; left: 5px; padding: 1px 5px; border-radius: 3px; background: #fff; color: #111; font: 600 10.5px var(--mono); white-space: nowrap; }
 .tl-mark { z-index: 2; }
+
+[hidden] { display: none !important; }

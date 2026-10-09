@@ -305,7 +305,7 @@ function renderTop() {
   const monitoring = S.sources.filter(s => s.status === 'monitoring').length;
   const speed = st.replay && st.replay.speed;
   setHTML($('#monitor-state'), monitoring
-    ? `<span class="rec"></span><span><b>Monitoring</b> ${monitoring} camera${monitoring > 1 ? 's' : ''}</span>
+    ? `<span class="rec"></span><span><b>Monitoring</b> ${monitoring} feed${monitoring > 1 ? 's' : ''}</span>
        <span class="chip" title="Indexed archive footage replayed in chronological order. Not a live camera feed.">archive replay${speed ? ' ' + esc(speed) + '×' : ''}</span>`
     : `<span class="rec off"></span><span>Idle</span>`);
   const chip = (name, ok, title, warn) => `<span class="chip ${ok == null ? '' : ok ? (warn ? 'warn' : 'ok') : 'bad'}" title="${esc(title)}"><span class="dot"></span>${name}</span>`;
@@ -330,32 +330,44 @@ function renderTop() {
   });
 }
 
+/** A feed is a source you added (configured or monitoring); the rest of the archive lives in Search. */
+const isFeed = src => !!src && (['monitoring', 'configuring', 'configured', 'specializing'].includes(src.status) || !!AM[src.id]);
+const feedState = src => src.status === 'monitoring' ? 'Monitoring' : (src.status === 'configuring' || AM[src.id]) ? 'Setting up…' : 'Paused';
+function defaultFeed() {
+  const feeds = S.sources.filter(isFeed);
+  return feeds.find(s => s.status === 'monitoring') || feeds[0] || null;
+}
+
 function renderSidebar() {
-  const sel = sourceById(S.selected);
+  const feeds = S.sources.filter(isFeed);
   const activeId = S.route.name === 'source' ? S.route.id : S.selected;
-  const items = S.sources.map(src => {
+  const items = feeds.map(src => {
     const c = src.incident_counts || {};
-    const n = (c.critical || 0) + (c.high || 0) + (c.medium || 0) + (c.low || 0);
-    const hot = (c.critical || 0) + (c.high || 0) > 0;
+    const live = src.status === 'monitoring';
+    const n = live ? (c.critical || 0) + (c.high || 0) + (c.medium || 0) + (c.low || 0) : 0;
+    const hot = live && (c.critical || 0) + (c.high || 0) > 0;
     const cl = src.classification;
-    return `<div class="src ${src.id === activeId ? 'active' : ''}" data-nav="/source/${enc(src.id)}" title="${esc(src.status || '')}">
+    return `<div class="src ${src.id === activeId ? 'active' : ''}" data-action="open-feed" data-id="${esc(src.id)}">
       <span class="thumb ${esc(src.status || '')}"></span>
       <div style="min-width:0"><div class="label">${esc(src.label || src.camera_id)}</div>
-        <div class="sub">${cl ? esc(cap(cl.domain)) + ' ' + pct(cl.confidence) : 'not configured'}</div></div>
-      <span class="count ${hot ? 'hot' : ''}" title="Incidents raised">${n || ''}</span>
+        <div class="sub">${cl ? esc(cap(cl.domain)) + ' · ' : ''}${esc(feedState(src))}</div></div>
+      <span class="count ${hot ? 'hot' : ''}" title="Incidents">${n || ''}</span>
     </div>`;
   }).join('');
-  const prof = sel && sel.profile_summary;
-  const profile = !sel ? '<div class="profile-box muted">No camera selected</div>'
-    : prof ? `<div class="profile-box"><div class="ptitle">${esc(prof.title || cap(domainOf(sel)))}</div>
-        <div class="muted small">${esc(prof.objectives ?? 0)} objectives${prof.mode === 'rules_only' ? ' · rules-only' : ''}</div>
-        ${prof.entities && prof.entities.length ? `<ul>${prof.entities.map(e => `<li>${esc(e)}</li>`).join('')}</ul>` : ''}</div>`
-    : `<div class="profile-box muted">No monitoring profile yet.</div>`;
+  const ups = (S.uploads || []).map(u => {
+    const up = u.upload || {};
+    const active = S.route.name === 'new' && S.fresh && S.fresh.sid === u.source_id;
+    const state = up.status === 'done' ? `${up.incidents ?? 0} incident${up.incidents === 1 ? '' : 's'}` : up.status === 'failed' ? 'Failed' : 'Analyzing…';
+    return `<div class="src ${active ? 'active' : ''}" data-action="open-upload" data-sid="${esc(u.source_id)}">
+      <span class="thumb ${up.status === 'done' ? 'configured' : 'configuring'}"></span>
+      <div style="min-width:0"><div class="label">${esc(up.filename || u.label)}</div><div class="sub">Uploaded · ${esc(state)}</div></div>
+      <span class="count"></span></div>`;
+  }).join('');
   setHTML($('#sidebar'), `
-    <div class="side-h"><span>Cameras</span><span class="mono muted">${S.sources.length}</span></div>
-    ${items || '<div class="empty" style="padding:12px">No indexed cameras found</div>'}
-    <div class="side-h"><span>Active profile</span></div>
-    ${profile}`);
+    <div class="side-h"><span>Feeds</span><span class="mono muted">${feeds.length + (S.uploads || []).length}</span></div>
+    ${items + ups || '<div class="empty" style="padding:12px">No feeds yet.</div>'}
+    <div style="padding:12px 12px 6px" class="btn-row"><button class="btn primary" style="flex:1" data-nav="/search">＋ Add a feed</button>${S.uploadEnabled ? '<button class="btn" style="flex:1" data-nav="/new">Upload a clip</button>' : ''}</div>
+    <div class="small muted" style="padding:0 12px">Search the VAST archive and press <b>Add to Monitor</b>${S.uploadEnabled ? ', or Import a clip' : ''}.</div>`);
 }
 
 // ---------------------------------------------------------------- views
@@ -363,40 +375,49 @@ const VIEWS = {};
 
 VIEWS.overview = {
   mount(main) {
-    main.innerHTML = `<div class="ws">
+    main.innerHTML = `<div id="ov-empty"></div>
+      <div class="ws" id="ov-ws">
       <section class="pane viewer-pane">
-        <header class="pane-h"><span class="pt">Viewer</span><span class="pr" id="ov-tabs"></span></header>
+        <header class="pane-h"><span class="pt" id="ov-title">Feed</span><span class="pr" id="ov-actions"></span></header>
         <div class="pane-b" id="ov-player"></div>
         <div class="transport" id="ov-transport"></div>
       </section>
       <section class="pane">
-        <header class="pane-h"><div class="tabs">
-          <button data-action="ov-tab" data-tab="incidents">Incidents</button>
-          <button data-action="ov-tab" data-tab="agent">Agent</button></div>
-          <span class="pr" id="ov-feed-meta"></span></header>
+        <header class="pane-h"><span class="pt">Incidents</span><span class="pr" id="ov-feed-meta"></span></header>
         <div class="pane-b flush" id="ov-side"></div>
       </section>
       <section class="pane timeline-pane">
-        <header class="pane-h"><span class="pt">Timeline</span><span class="pr" id="ov-stats"></span></header>
+        <header class="pane-h"><span class="pt">Timeline</span></header>
         <div class="pane-b flush" id="ov-timeline"></div>
       </section>
     </div>`;
   },
   async update(main) {
-    const src = sourceById(S.selected);
-    const st = (S.status && S.status.stats) || null;
-    const incidents = sortIncidents(S.incidents);
-    const mine = incidents.filter(i => i.source_id === S.selected);
-    const configured = S.sources.filter(s => s.classification).length;
+    let src = sourceById(S.selected);
+    if (!isFeed(src)) { src = defaultFeed(); S.selected = src ? src.id : null; }
+    const empty = $('#ov-empty', main), ws = $('#ov-ws', main);
+    if (!src) {
+      if (ws) ws.style.display = 'none';
+      setHTML(empty, `<div class="pane" style="max-width:640px;margin:60px auto"><div class="pane-b" style="padding:28px;text-align:center">
+        <div style="font-size:18px;font-weight:600;margin-bottom:6px">Add your first feed</div>
+        <div class="muted" style="margin-bottom:16px">Find footage in the VAST archive and press Add to Monitor. Sightline works out what the feed shows, decides what to watch for, and starts monitoring it.</div>
+        <div class="btn-row" style="justify-content:center"><button class="btn primary" data-nav="/search">Search the archive</button>${S.uploadEnabled ? '<button class="btn" data-nav="/new">Import a clip</button>' : ''}</div></div></div>`);
+      return;
+    }
+    if (ws) ws.style.display = '';
+    setHTML(empty, '');
+    const live = src.status === 'monitoring';
+    const mine = live ? sortIncidents(S.incidents.filter(i => i.source_id === src.id)) : [];
+    const cl = src.classification;
 
-    document.querySelectorAll('[data-action="ov-tab"]').forEach(b => b.classList.toggle('on', b.dataset.tab === S.ovTab));
-    setHTML($('#ov-tabs', main), `<span class="seg">${S.sources.filter(s => s.classification).map(s =>
-      `<button class="${s.id === S.selected ? 'on' : ''}" data-action="select-source" data-id="${esc(s.id)}">${esc(s.label || s.camera_id)}</button>`).join('')}</span>`);
+    setHTML($('#ov-title', main), `${esc(src.label || src.camera_id)} <span class="tag" style="margin-left:6px">${esc(feedState(src))}</span>${cl ? `<span class="tag">${esc(cap(cl.domain))}</span>` : ''}`);
+    setHTML($('#ov-actions', main), `<button class="btn" data-nav="/source/${enc(src.id)}">Details</button>
+      ${live ? `<button class="btn" data-action="monitor-stop" data-id="${esc(src.id)}">Pause</button>` : addMonitorInline(src.id, true)}`);
 
     const latest = mine[0];
     const ev = latest && (latest.evidence || []).find(e => e.role === 'event');
-    const replay = (src && src.replay) || null;
-    if (S.scrub && S.scrub.id === S.selected && (S.scrub.seg || S.scrub.loading || S.scrub.error)) {
+    const replay = live ? (src.replay || null) : null;
+    if (S.scrub && S.scrub.id === src.id && (S.scrub.seg || S.scrub.loading || S.scrub.error)) {
       renderScrubViewer();
     } else if (latest && ev) {
       setHTML($('#ov-player', main), player(ev, {
@@ -405,33 +426,25 @@ VIEWS.overview = {
       }));
     } else {
       setHTML($('#ov-player', main), player(replay && replay.segment_uri ? { segment: replay.segment_uri } : null, {
-        badge: replay && replay.active ? 'REPLAY' : '', cam: src && src.camera_id,
-        overlay: replay && replay.caption ? `<span class="muted">${esc(replay.caption)}</span>` : '',
+        cam: src.camera_id,
+        overlay: live ? '<span class="muted">Watching. No incidents yet. Drag the timeline to look through the footage.</span>'
+                      : '<span class="muted">Paused. Press Start monitoring to have Sightline watch this feed.</span>',
       }));
     }
-    const segSec = src && src.segment_seconds;
-    const scrubbing = S.scrub && S.scrub.id === S.selected && src;
-    setHTML($('#ov-transport', main), `<span>${esc(src ? src.camera_id : '')}</span>
-      <span class="tc" title="${scrubbing ? 'Scrub position' : 'Replay position'}">${scrubbing ? esc(fmtTC(Math.floor(S.scrub.frac * ((replay && replay.total_segments) || src.segment_count || 0)) * (segSec || 5))) : replay ? (segSec ? esc(fmtTC(replay.segment * segSec)) : 'SEG ' + esc(replay.segment)) : '--:--:--:--'}</span>
-      <span class="r">${replay && replay.active ? `${esc(replay.speed)}× · ${esc(replay.segment)}/${esc(replay.total_segments)}` : 'paused'}</span>`);
+    const segSec = src.segment_seconds || 5;
+    const scrubbing = S.scrub && S.scrub.id === src.id;
+    setHTML($('#ov-transport', main), `<span>${esc(src.camera_id)}</span>
+      <span class="tc">${scrubbing ? esc(fmtTC(Math.floor(S.scrub.frac * (src.segment_count || 0)) * segSec)) : replay ? esc(fmtTC((replay.segment || 0) * segSec)) : '--:--:--:--'}</span>
+      <span class="r">${live && replay && replay.active ? `${esc(replay.speed)}× replay` : feedState(src).toLowerCase()}</span>`);
 
     const fresh = new Set();
-    if (S.feedReady) incidents.forEach(i => { if (!S.seen.has(i.id)) fresh.add(i.id); });
-    incidents.forEach(i => S.seen.add(i.id));
+    if (S.feedReady) mine.forEach(i => { if (!S.seen.has(i.id)) fresh.add(i.id); });
+    S.incidents.forEach(i => S.seen.add(i.id));
     S.feedReady = true;
-    setHTML($('#ov-feed-meta', main), `${incidents.length} raised · 0 searches typed`);
-    if (S.ovTab === 'agent') {
-      try { setHTML($('#ov-side', main), src ? pipelineHTML(await GET(`api/pipeline/${enc(src.id)}`)) : ''); }
-      catch (e) { setHTML($('#ov-side', main), `<div class="empty" style="padding:12px">Pipeline unavailable (${esc(e.message)})</div>`); }
-    } else {
-      setHTML($('#ov-side', main), incidents.length ? `<div class="feed">${incidents.map(i => feedItem(i, fresh.has(i.id))).join('')}</div>` : '<div class="empty" style="padding:12px">No incidents yet.</div>');
-    }
-
-    setHTML($('#ov-stats', main), `<span class="figures">
-      <span title="Cameras with a Sightline-generated classification and monitoring profile"><b>${configured}/${S.sources.length}</b>self-configured</span>
-      ${st ? `<span title="Segments that passed deterministic gates and were evaluated"><b>${esc(st.candidates ?? '–')}</b>evaluated</span>
-      <span title="Candidates the investigation judged unclear or false (kept for audit)"><b>${esc(st.rejected ?? '–')}</b>rejected</span>` : ''}
-      <span><b>${incidents.length}</b>incidents</span></span>`);
+    setHTML($('#ov-feed-meta', main), live ? `${mine.length}` : '');
+    setHTML($('#ov-side', main), !live ? '<div class="empty" style="padding:12px">Not monitoring this feed.</div>'
+      : mine.length ? `<div class="feed">${mine.map(i => feedItem(i, fresh.has(i.id))).join('')}</div>`
+      : '<div class="empty" style="padding:12px">No incidents yet. Sightline is watching.</div>');
     if (!DRAG) setHTML($('#ov-timeline', main), timelineHTML(src, mine));
   },
 };
@@ -534,17 +547,23 @@ VIEWS.source = {
   mount(main) {
     main.innerHTML = `<div class="stack">
       <div id="sv-head"></div>
-      <div class="cols2">
-        ${pane('Environment', '', { id: 'sv-config' })}
-        ${pane('Agent pipeline', '', { id: 'sv-pipeline', flush: true })}
+      <div class="cols-3-2">
+        ${pane('What Sightline decided', '', { id: 'sv-summary' })}
+        ${pane('Incidents', '', { id: 'sv-incidents', flush: true })}
       </div>
-      ${pane('Monitoring plan', '', { id: 'sv-plan', flush: true, right: 'generated by Sightline, not hand-written' })}
-      <div class="cols2">
-        ${pane('Cosmos prompt', '', { id: 'sv-prompt' })}
-        ${pane('Re-analysis', '', { id: 'sv-reingest', right: 'preview in seconds · VAST index async' })}
+      <div><button class="btn" data-action="toggle-how" id="sv-how-btn">${S.showHow ? 'Hide details' : 'Show how Sightline configured this feed'}</button></div>
+      <div class="stack" id="sv-how" ${S.showHow ? '' : 'hidden'}>
+        <div class="cols2">
+          ${pane('Why it thinks so', '', { id: 'sv-config' })}
+          ${pane('Agent pipeline', '', { id: 'sv-pipeline', flush: true })}
+        </div>
+        ${pane('Monitoring plan', '', { id: 'sv-plan', flush: true, right: 'generated by Sightline, not hand-written' })}
+        <div class="cols2">
+          ${pane('Cosmos prompt', '', { id: 'sv-prompt' })}
+          ${pane('Re-analysis', '', { id: 'sv-reingest', right: 'preview in seconds · VAST index async' })}
+        </div>
+        ${pane('Analysis versions', '', { id: 'sv-evo' })}
       </div>
-      ${pane('Analysis versions', '', { id: 'sv-evo' })}
-      ${pane('Incidents', '', { id: 'sv-incidents', flush: true })}
     </div>`;
   },
   async update(main) {
@@ -552,27 +571,31 @@ VIEWS.source = {
     S.selected = id;
     let d;
     try { d = await GET(`api/sources/${enc(id)}`); }
-    catch (e) { setHTML($('#sv-head', main), `<div class="page-h">Camera unavailable: ${esc(e.message)}</div>`); return; }
+    catch (e) { setHTML($('#sv-head', main), `<div class="page-h">Feed unavailable: ${esc(e.message)}</div>`); return; }
     const cl = d.classification, pf = d.profile;
     const monitoring = d.status === 'monitoring';
+    const src0 = { ...d, status: d.status };
     setHTML($('#sv-head', main), `<div class="page-h">
       <div class="grow"><h1>${esc(d.label || d.camera_id)}
           ${cl ? `<span class="tag accent" title="Sightline's environment classification">${esc(cap(cl.domain))} ${pct(cl.confidence)}</span>` : ''}
-          ${cl && cl.mode === 'rules_only' ? '<span class="tag warn">rules-only</span>' : ''}</h1>
-        <div class="meta">${esc(d.camera_id)} · ${esc(d.location || '–')} · ${esc(d.capture_type || '–')} · ${esc(d.segment_count ?? '?')} segments · ${cl && cl.camera_type ? esc(cl.camera_type) + ' camera · ' : ''}${esc(d.status)}</div></div>
+          <span class="tag">${esc(feedState(src0))}</span></h1>
+        <div class="meta">${esc(d.camera_id)} · ${esc(d.segment_count ?? '?')} segments${cl && cl.camera_type ? ' · ' + esc(cl.camera_type) + ' camera' : ''}</div></div>
       <div class="btn-row">
-        ${cl ? `<button class="btn" data-action="configure" data-id="${esc(d.id)}">Re-run self-configuration</button>`
-             : addMonitorInline(d.id, true)}
-        ${pf ? (monitoring
-          ? `<button class="btn danger" data-action="monitor-stop" data-id="${esc(d.id)}">Stop monitoring</button>`
-          : `<button class="btn primary" data-action="monitor-start" data-id="${esc(d.id)}">Start monitoring</button>`) : ''}
+        ${monitoring ? `<button class="btn" data-nav="/">Watch</button><button class="btn" data-action="monitor-stop" data-id="${esc(d.id)}">Pause</button>`
+                     : addMonitorInline(d.id, true)}
       </div></div>`);
 
+    setHTML($('#sv-summary', main), cl ? `
+      <div style="margin-bottom:10px">${esc(cl.description || '')}</div>
+      <div class="small muted" style="margin-bottom:4px">Watching for</div>
+      ${((pf && pf.objectives) || []).map(o => `<div style="padding:4px 0">${sevPill(o.severity)} <span style="margin-left:6px">${esc(o.name)}</span></div>`).join('') || '<div class="empty">Planning…</div>'}
+      ${((pf && pf.dropped) || []).map(x => `<div style="padding:4px 0" class="muted"><span class="sev low"><i></i>N/A</span> <span style="margin-left:6px">${esc(x.name || x.id)}: not applicable here</span></div>`).join('')}`
+      : `<div class="empty">Sightline hasn't looked at this feed yet. Press Add to Monitor.</div>`);
+
     setHTML($('#sv-config', main), cl ? `
-      <div style="margin-bottom:8px">${esc(cl.description || '')}</div>
       <ul class="evidence-list">${(cl.evidence || []).map(e => `<li><span class="tag">${esc(e.source)}</span><span>${esc(e.signal)} <span class="muted">${esc(e.supports || '')}</span></span></li>`).join('')}</ul>
       ${cl.important_entities && cl.important_entities.length ? `<div style="margin-top:10px">${cl.important_entities.map(e => `<span class="tag accent">${esc(e)}</span>`).join('')}</div>` : ''}`
-      : `<div class="empty">Not configured. Sightline hasn't looked at this camera yet.</div>`);
+      : `<div class="empty">Not configured yet.</div>`);
 
     setHTML($('#sv-pipeline', main), pipelineHTML(d.pipeline));
 
@@ -595,10 +618,11 @@ VIEWS.source = {
       ${pf.information_gaps && pf.information_gaps.length ? `<div class="small muted" style="margin:10px 0 4px">Closes these gaps in the current captions:</div><ul class="small" style="margin:0;padding-left:18px">${pf.information_gaps.map(g => `<li>${esc(g)}</li>`).join('')}</ul>` : ''}`
       : `<div class="empty">No prompt generated. The existing captions already cover this camera's objectives.</div>`);
 
-    setHTML($('#sv-reingest', main), reingestHTML(d, d.reingest));
+    setHTML($('#sv-reingest', main), reingestHTML(d, d.reingest) + (cl ? `<div class="btn-row" style="margin-top:10px"><button class="btn" data-action="configure" data-id="${esc(d.id)}">Re-run self-configuration</button></div>` : ''));
     setHTML($('#sv-evo', main), evolutionHTML(d.evolution));
-    const incs = sortIncidents(dedupeIncidents(d.incidents || S.incidents.filter(i => i.source_id === id)));
-    setHTML($('#sv-incidents', main), incs.length ? `<div class="feed">${incs.map(i => feedItem(i, false)).join('')}</div>` : '<div class="empty" style="padding:12px">No incidents from this camera yet.</div>');
+    const incs = monitoring ? sortIncidents(dedupeIncidents(d.incidents || S.incidents.filter(i => i.source_id === id))) : [];
+    setHTML($('#sv-incidents', main), !monitoring ? '<div class="empty" style="padding:12px">Not monitoring this feed.</div>'
+      : incs.length ? `<div class="feed">${incs.map(i => feedItem(i, false)).join('')}</div>` : '<div class="empty" style="padding:12px">No incidents yet.</div>');
   },
 };
 
@@ -671,7 +695,7 @@ function addMonitorInline(id, stay, video) {
   const src = sourceById(id);
   const busy = AM[id];
   const on = !busy && src && src.status === 'monitoring';
-  const label = busy ? busy.btn : on ? 'Monitoring · open' : '＋ Add to Monitor';
+  const label = busy ? busy.btn : on ? 'Monitoring · open' : (src && src.classification ? '▶ Start monitoring' : '＋ Add to Monitor');
   return `<button class="btn ${on ? '' : 'primary'}" data-action="add-monitor" data-id="${esc(id)}"${video ? ` data-video="${esc(video)}"` : ''}${stay ? ' data-stay="1"' : ''}${busy ? ' disabled' : ''}>${esc(label)}</button>
     <span class="small muted mono" data-am-status="${esc(id)}">${esc(busy ? busy.line : '')}</span>`;
 }
@@ -703,7 +727,7 @@ async function addToMonitor(el) {
   if (src && src.status === 'monitoring') { S.selected = id; if (!stay) nav('/source/' + enc(id)); return; }
   try {
     if (!src || !src.classification) {
-      say('Configuring…', 'Sightline is looking at this camera');
+      say('Configuring…', 'Sightline is looking at this feed');
       const r = await POST(`api/sources/${enc(id)}/configure`, {});
       await waitJob(r.job_id, 180000, async () => {
         try {
@@ -716,7 +740,7 @@ async function addToMonitor(el) {
     say('Starting…', 'Starting autonomous monitoring');
     await POST(`api/sources/${enc(id)}/monitor`, el.dataset.video ? { video: el.dataset.video } : {});
     delete AM[id];
-    toast('Sightline configured this camera and started monitoring', 'info');
+    toast('Sightline configured this feed and started monitoring', 'info');
     S.selected = id;
     if (!stay) nav('/source/' + enc(id));
   } catch (e) {
@@ -735,7 +759,7 @@ VIEWS.search = {
         <input type="text" name="q" placeholder="forklift close to a worker" value="${esc(r.q)}">
         <select name="source"><option value="">All cameras</option>${S.sources.map(s => `<option value="${esc(s.id)}" ${s.id === r.source ? 'selected' : ''}>${esc(s.label || s.camera_id)}</option>`).join('')}</select>
         <button class="btn primary">Search</button></form>
-      <div class="small muted" style="margin-top:8px">Find any footage in the VAST archive, then <b>Add to Monitor</b>: Sightline works out what the camera is, decides what to watch for, writes its own prompt and starts monitoring. No rules or queries to write.</div>`,
+      <div class="small muted" style="margin-top:8px">Find any footage in the VAST archive, then <b>Add to Monitor</b>: Sightline works out what the feed shows, decides what to watch for, writes its own prompt and starts monitoring. No rules or queries to write.</div>`,
       { right: 'VAST hybrid search · Cosmos-Embed1' })}
       ${pane('Results', '<div class="empty">Enter a query.</div>', { id: 'search-results' })}</div>`;
     $('#search-form', main).addEventListener('submit', e => {
@@ -1010,10 +1034,13 @@ async function render() {
 
 const ACTIONS = {
   'select-source': el => { S.selected = el.dataset.id; S.scrub = null; },
+  'open-feed': el => { S.selected = el.dataset.id; S.scrub = null; const m = $('#main'); if (S.route.name === 'overview' && m) VIEWS.overview.update(m); else nav('/'); },
+  'open-upload': el => { S.fresh = { sid: el.dataset.sid }; if (S.route.name === 'new') { VIEWS.new.mount($('#main')); VIEWS.new.update($('#main')); } else nav('/new'); },
+  'toggle-how': el => { S.showHow = !S.showHow; const h = $('#sv-how'); if (h) h.hidden = !S.showHow; el.textContent = S.showHow ? 'Hide details' : 'Show how Sightline configured this feed'; },
   'scrub-clear': () => { S.scrub = null; const b = $('#ov-player'); if (b) b._html = null; },
   'add-monitor': el => addToMonitor(el),
   'ov-tab': el => { S.ovTab = el.dataset.tab; },
-  'configure': async el => { await POST(`api/sources/${enc(el.dataset.id)}/configure`, {}); toast('Sightline is looking at this camera…', 'info'); },
+  'configure': async el => { await POST(`api/sources/${enc(el.dataset.id)}/configure`, {}); toast('Sightline is looking at this feed…', 'info'); },
   'monitor-start': async el => { await POST(`api/sources/${enc(el.dataset.id)}/monitor`, {}); toast('Monitoring started (archive replay)', 'info'); },
   'monitor-stop': async el => { await DEL(`api/sources/${enc(el.dataset.id)}/monitor`); },
   'plan-reingest': async el => { await POST(`api/sources/${enc(el.dataset.id)}/reingest/plan`, {}); },
@@ -1065,7 +1092,8 @@ async function refresh() {
     const [sources, incidents] = await Promise.all([GET('api/sources'), GET('api/incidents')]);
     S.sources = Array.isArray(sources) ? sources : [];
     S.incidents = dedupeIncidents(Array.isArray(incidents) ? incidents : []);
-    if (!S.selected || !sourceById(S.selected)) S.selected = (S.sources.find(s => s.status === 'monitoring') || S.sources[0] || {}).id || null;
+    if (S.uploadEnabled) { try { S.uploads = await GET('api/newsource'); } catch (_) { S.uploads = S.uploads || []; } }
+    if (!S.selected || !sourceById(S.selected)) S.selected = (defaultFeed() || {}).id || null;
     renderTop();
     renderSidebar();
     const v = VIEWS[S.route.name];
