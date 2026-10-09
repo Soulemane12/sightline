@@ -23,13 +23,14 @@
 </head>
 <body>
 <header class="topbar">
-  <div class="brand" data-nav="/">
+  <button class="brand" data-nav="/" aria-label="Sightline home">
     <span class="logo" aria-hidden="true"></span>
     <span class="name">Sightline</span>
-  </div>
+  </button>
   <nav class="pages" id="pages">
-    <button data-nav="/" data-page="monitor">Monitor</button>
     <button data-nav="/search" data-page="search">Search</button>
+    <button data-nav="/monitor" data-page="monitor">Monitor</button>
+    <button data-nav="/report" data-page="report">Report</button>
     <button data-nav="/new" data-page="new">Import</button>
     <button data-nav="/live" data-page="live">Live</button>
   </nav>

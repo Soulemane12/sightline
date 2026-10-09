@@ -15,8 +15,9 @@ const S = {
   seen: new Set(),
   feedReady: false,
   selected: null,
-  route: { name: 'overview' },
+  route: { name: 'home' },
   ovTab: 'incidents',
+  filter: { cams: [], sev: 'low', period: 'all', since: '', until: '' },
   busy: false,
   offline: false,
   live: null,
@@ -303,6 +304,111 @@ function dedupeIncidents(list) {
   return [...best.values()];
 }
 
+// ---------------------------------------------------------------- incident filter (Monitor scope = report scope)
+const SEV_RANK = { low: 0, medium: 1, high: 2, critical: 3 };
+const PERIODS = [['1h', 'Last hour'], ['today', 'Today'], ['all', 'All time'], ['custom', 'Custom range']];
+const REDUCED_MOTION = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+const DEFAULT_FILTER = { cams: [], sev: 'low', period: 'all', since: '', until: '' };
+
+function filterFromQuery(q) {
+  const sev = q.get('sev'), period = q.get('period');
+  return {
+    cams: (q.get('cams') || '').split(',').filter(Boolean),
+    sev: SEV_RANK[sev] != null ? sev : 'low',
+    period: PERIODS.some(p => p[0] === period) ? period : 'all',
+    since: q.get('since') || '', until: q.get('until') || '',
+  };
+}
+function filterQuery(f) {
+  const q = new URLSearchParams();
+  if (f.cams.length) q.set('cams', f.cams.join(','));
+  if (f.sev !== 'low') q.set('sev', f.sev);
+  if (f.period !== 'all') q.set('period', f.period);
+  if (f.period === 'custom') { if (f.since) q.set('since', f.since); if (f.until) q.set('until', f.until); }
+  return q.toString();
+}
+const isoOrNull = v => { const d = v ? new Date(v) : null; return d && !isNaN(d) ? d.toISOString() : null; };
+/** Presets are relative to now, so they resolve to absolute bounds at the moment of use. */
+function filterRange(f) {
+  if (f.period === '1h') return { since: new Date(Date.now() - 3600e3).toISOString(), until: null };
+  if (f.period === 'today') { const d = new Date(); d.setHours(0, 0, 0, 0); return { since: d.toISOString(), until: null }; }
+  if (f.period === 'custom') return { since: isoOrNull(f.since), until: isoOrNull(f.until) };
+  return { since: null, until: null };
+}
+function applyFilter(list, f) {
+  const { since, until } = filterRange(f);
+  const lo = since ? Date.parse(since) : null, hi = until ? Date.parse(until) : null;
+  const floor = SEV_RANK[f.sev] || 0;
+  return list.filter(i => {
+    if (f.cams.length && !f.cams.includes(i.source_id)) return false;
+    if ((SEV_RANK[i.severity] || 0) < floor) return false;
+    const t = Date.parse(i.created_at);
+    if (lo != null && !(t >= lo)) return false;
+    if (hi != null && !(t <= hi)) return false;
+    return true;
+  });
+}
+function reportRequest(f) {
+  const r = filterRange(f);
+  return { source_ids: f.cams, since: r.since, until: r.until, min_severity: f.sev };
+}
+function previewQuery(f) {
+  const r = reportRequest(f), q = new URLSearchParams();
+  if (r.source_ids.length) q.set('sources', r.source_ids.join(','));
+  if (r.since) q.set('since', r.since);
+  if (r.until) q.set('until', r.until);
+  q.set('min_severity', r.min_severity);
+  return q.toString();
+}
+function toLocalInput(iso) {
+  const d = iso ? new Date(iso) : null;
+  if (!d || isNaN(d)) return '';
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+/** A saved report's backend filter, as a Monitor filter (absolute range). */
+function fromReportFilter(rf) {
+  rf = rf || {};
+  const ranged = rf.since || rf.until;
+  return { cams: rf.source_ids || [], sev: rf.min_severity || 'low', period: ranged ? 'custom' : 'all',
+    since: toLocalInput(rf.since), until: toLocalInput(rf.until) };
+}
+function fmtDateTime(iso) {
+  const d = new Date(iso);
+  return isNaN(d) ? '' : d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+function sevWords(bySev) {
+  return ['critical', 'high', 'medium', 'low'].filter(k => bySev && bySev[k]).map(k => `${bySev[k]} ${k}`).join(', ');
+}
+function scopeText(rf) {
+  const cams = rf.source_ids && rf.source_ids.length ? rf.source_ids.map(sourceLabel).join(', ') : 'All cameras';
+  const period = rf.since || rf.until ? `${rf.since ? fmtDateTime(rf.since) : 'the start'} to ${rf.until ? fmtDateTime(rf.until) : 'now'}` : 'All time';
+  const sev = rf.min_severity && rf.min_severity !== 'low' ? `${SEV_LABEL[rf.min_severity]}${rf.min_severity === 'critical' ? ' only' : ' and above'}` : 'Any severity';
+  return { cams, period, sev };
+}
+
+function filterBarHTML(f, scope, { camera = true } = {}) {
+  const cams = S.sources.filter(s => s.classification || s.status === 'monitoring' || f.cams.includes(s.id));
+  const camVal = f.cams.length === 1 ? f.cams[0] : f.cams.length > 1 ? '__multi' : '';
+  const opt = (v, label, on) => `<option value="${esc(v)}"${on ? ' selected' : ''}>${esc(label)}</option>`;
+  return `<form class="filters" data-filter="${esc(scope)}" aria-label="Incident filter">
+    ${camera ? `<label><span>Camera</span><select name="cam">${opt('', 'All cameras', !camVal)}
+      ${f.cams.length > 1 ? opt('__multi', `${f.cams.length} cameras`, true) : ''}
+      ${cams.map(s => opt(s.id, s.label || s.camera_id, camVal === s.id)).join('')}</select></label>` : ''}
+    <label><span>Severity</span><select name="sev">${['low', 'medium', 'high', 'critical'].map(k =>
+      opt(k, k === 'low' ? 'Any severity' : SEV_LABEL[k] + (k === 'critical' ? ' only' : ' and above'), f.sev === k)).join('')}</select></label>
+    <label><span>Raised</span><select name="period">${PERIODS.map(([v, l]) => opt(v, l, f.period === v)).join('')}</select></label>
+    ${f.period === 'custom' ? `<label><span>From</span><input type="datetime-local" name="since" value="${esc(f.since)}"></label>
+      <label><span>To</span><input type="datetime-local" name="until" value="${esc(f.until)}"></label>` : ''}
+  </form>`;
+}
+function readFilter(form, prev) {
+  const fd = new FormData(form);
+  const cam = fd.get('cam');
+  return { cams: cam === null || cam === '__multi' ? prev.cams : cam ? [cam] : [], sev: fd.get('sev') || 'low', period: fd.get('period') || 'all',
+    since: fd.get('since') || prev.since || '', until: fd.get('until') || prev.until || '' };
+}
+
 // ---------------------------------------------------------------- top bar + sidebar
 function renderTop() {
   const st = S.status || {};
@@ -325,7 +431,7 @@ function renderTop() {
   html += chip('LLM', st.llm ? llm.ok : null, `W&B Inference${llm.model ? ': ' + llm.model : ''}${llm.mode === 'rules_only' ? ' (rules-only fallback active)' : ''}`, llm.mode === 'rules_only');
   html += chip('VastDB', st.state ? state.backend === 'vastdb' : null, state.backend === 'vastdb' ? 'Sightline state persisted in VastDB (schema "sightline")' : 'State is local only');
   setHTML($('#health'), html);
-  const page = { overview: 'monitor', source: 'monitor', incident: 'monitor', search: 'search', new: 'new', live: 'live' }[S.route.name];
+  const page = { overview: 'monitor', source: 'monitor', incident: 'monitor', search: 'search', report: 'report', new: 'new', live: 'live' }[S.route.name];
   const flags = st.flags || {};
   const shown = { new: MOCK || !!flags.upload || !!S.uploadEnabled, live: MOCK || !!flags.live };
   document.querySelectorAll('#pages button').forEach(b => {
@@ -377,6 +483,78 @@ function renderSidebar() {
 // ---------------------------------------------------------------- views
 const VIEWS = {};
 
+/** One camera's footage as a thin strip: incidents at their position in the footage, playhead at the replay clock. */
+function watchStripHTML(src, incs) {
+  const r = src.replay;
+  const total = (r && r.total_segments) || src.segment_count || 0;
+  const pos = r && total ? Math.min(1, (r.segment || 0) / total) : null;
+  const marks = incs.filter(i => i.replay_pos != null).map(i =>
+    `<span class="tl-mark ${esc(i.severity)}" style="left:${(i.replay_pos * 100).toFixed(2)}%" title="${esc(i.title)}"></span>`).join('');
+  return `<span class="w-strip" aria-hidden="true">${marks}${pos != null ? `<span class="playhead" style="left:${(pos * 100).toFixed(2)}%"></span>` : ''}</span>`;
+}
+
+VIEWS.home = {
+  mount(main) {
+    main.innerHTML = `<div class="home">
+      <section class="home-hero">
+        <form class="ask" id="home-ask" role="search">
+          <h1><label for="home-q">What happened?</label></h1>
+          <p class="lede">Describe a moment in plain words. Sightline searches every indexed camera; you review what it flagged in Monitor, then turn it into a safety report.</p>
+          <div class="ask-row"><input id="home-q" type="text" name="q" placeholder="car turning through a crosswalk with people in it" autocomplete="off">
+            <button class="btn primary">Search</button></div>
+          <div class="ask-chips" id="home-chips"></div>
+        </form>
+        <div class="home-clip" id="home-clip"></div>
+      </section>
+      ${pane('Cameras on watch', '', { id: 'home-watch', flush: true, right: '<span id="home-watch-meta"></span>' })}
+      ${pane('Safety report', '', { id: 'home-report' })}
+    </div>`;
+    $('#home-ask', main).addEventListener('submit', e => {
+      e.preventDefault();
+      const q = String(new FormData(e.target).get('q') || '').trim();
+      if (q) nav(`/search?q=${enc(q)}`);
+      else $('#home-q', main).focus();
+    });
+  },
+  update(main) {
+    const incidents = sortIncidents(S.incidents);
+    const watching = S.sources.filter(s => s.status === 'monitoring');
+
+    const hints = [...new Set(incidents.map(i => i.search_hint || i.title).filter(Boolean))].slice(0, 4);
+    setHTML($('#home-chips', main), hints.map(h => `<button type="button" class="chip-q" data-nav="/search?q=${enc(h)}">${esc(h)}</button>`).join(''));
+
+    const lead = incidents.find(i => i.severity === 'critical' || i.severity === 'high') || incidents[0];
+    const ev = lead && (lead.evidence || []).find(e => e.role === 'event');
+    setHTML($('#home-clip', main), lead && ev ? `${player(ev, { autoplay: !REDUCED_MOTION, cam: lead.camera_id })}
+        <div class="clip-cap">
+          <div class="cc-title">${sevPill(lead.severity)}<span>${esc(lead.title)}</span></div>
+          <div class="cc-meta">${esc(lead.camera_id || sourceLabel(lead.source_id))}, ${pct(lead.confidence && lead.confidence.value)} confidence, raised ${esc(clock(lead.created_at))}</div>
+          <button class="btn" data-nav="/incident/${enc(lead.id)}">Review this incident</button>
+        </div>`
+      : `<div class="clip-empty">${watching.length
+        ? `<p>Sightline is watching ${watching.length} camera${watching.length > 1 ? 's' : ''}. Incidents appear here as soon as one is raised.</p>`
+        : `<p>No camera is being watched yet. Search the archive, then choose Add to Monitor on a result to start.</p>
+           <button class="btn primary" data-nav="/search">Search the archive</button>`}</div>`);
+
+    setHTML($('#home-watch-meta', main), watching.length ? `${watching.length} of ${S.sources.length} cameras` : '');
+    setHTML($('#home-watch', main), watching.length ? watching.map(src => {
+      const mine = incidents.filter(i => i.source_id === src.id);
+      const c = src.incident_counts || {};
+      const counts = ['critical', 'high', 'medium'].filter(k => c[k]).map(k => `<span class="sev ${k}"><i></i>${esc(c[k])}</span>`).join('');
+      return `<button class="watch-row" data-nav="/monitor?cams=${enc(src.id)}">
+          <span class="w-name">${esc(src.label || src.camera_id)}<span class="w-sub">${src.classification ? esc(cap(src.classification.domain)) : 'Not configured'}</span></span>
+          ${watchStripHTML(src, mine)}
+          <span class="w-count">${counts || '<span class="muted small">No incidents</span>'}</span>
+        </button>`;
+    }).join('') : '<div class="empty" style="padding:12px">No cameras on watch. Choose Add to Monitor on a search result to start.</div>');
+
+    const n = applyFilter(incidents, S.filter).length;
+    setHTML($('#home-report', main), `${filterBarHTML(S.filter, 'home')}
+      <div class="report-go"><span class="small ${n ? '' : 'muted'}">${n ? `${n} incident${n > 1 ? 's' : ''} match` : 'No incidents match. Widen the period or lower the severity.'}</span>
+        <button class="btn primary" data-nav="/report?${esc(filterQuery(S.filter))}">Start report</button></div>`);
+  },
+};
+
 VIEWS.overview = {
   mount(main) {
     main.innerHTML = `<div id="ov-empty"></div>
@@ -387,9 +565,11 @@ VIEWS.overview = {
         <div class="transport" id="ov-transport"></div>
         <div id="ov-tagbar"></div>
       </section>
-      <section class="pane">
+      <section class="pane side-pane">
         <header class="pane-h"><span class="pt">Incidents</span><span class="pr" id="ov-feed-meta"></span></header>
+        <div id="ov-filter"></div>
         <div class="pane-b flush" id="ov-side"></div>
+        <div class="ov-report" id="ov-report"></div>
       </section>
       <section class="pane timeline-pane">
         <header class="pane-h"><span class="pt">Timeline</span></header>
@@ -398,6 +578,11 @@ VIEWS.overview = {
     </div>`;
   },
   async update(main) {
+    if (!S.route.camPinned) {
+      S.route.camPinned = true;
+      const want = S.filter.cams[0];
+      if (want && isFeed(sourceById(want))) { S.selected = want; S.scrub = null; }
+    }
     let src = sourceById(S.selected);
     if (!isFeed(src)) { src = defaultFeed(); S.selected = src ? src.id : null; }
     const empty = $('#ov-empty', main), ws = $('#ov-ws', main);
@@ -411,8 +596,14 @@ VIEWS.overview = {
     }
     if (ws) ws.style.display = '';
     setHTML(empty, '');
+    if (S.filter.cams.length !== 1 || S.filter.cams[0] !== src.id) {
+      if (S.filter.cams.length) S.route.from = '';  // switched away from the camera the search opened
+      S.filter = S.route.filter = { ...S.filter, cams: [src.id] };
+      history.replaceState(null, '', `#/monitor?${filterQuery(S.filter)}${S.route.from ? `&from=${enc(S.route.from)}` : ''}`);
+    }
     const live = src.status === 'monitoring';
-    const mine = live ? sortIncidents(S.incidents.filter(i => i.source_id === src.id)) : [];
+    const feedAll = sortIncidents(S.incidents.filter(i => i.source_id === src.id));
+    const mine = applyFilter(feedAll, S.filter);
     const cl = src.classification;
 
     setHTML($('#ov-title', main), `${esc(src.label || src.camera_id)} <span class="tag" style="margin-left:6px">${esc(feedState(src))}</span>${cl ? `<span class="tag">${esc(cap(cl.domain))}</span>` : ''}`);
@@ -447,17 +638,21 @@ VIEWS.overview = {
     if (S.feedReady) mine.forEach(i => { if (!S.seen.has(i.id)) fresh.add(i.id); });
     S.incidents.forEach(i => S.seen.add(i.id));
     S.feedReady = true;
-    setHTML($('#ov-feed-meta', main), live ? `${mine.length}` : '');
+    setHTML($('#ov-feed-meta', main), mine.length !== feedAll.length ? `${mine.length} of ${feedAll.length}` : `${mine.length}`);
+    const from = S.route.from;
+    setHTML($('#ov-filter', main), `${from ? `<button class="back from-search" data-nav="/search?q=${enc(from)}">← Results for “${esc(from)}”</button>` : ''}${filterBarHTML(S.filter, 'monitor', { camera: false })}`);
     try { S.tags[src.id] = await GET(`api/tags?source_id=${enc(src.id)}`); } catch (_) { /* optional */ }
     const tags = S.tags[src.id] || [];
-    setHTML($('#ov-side', main), (!live ? '<div class="empty" style="padding:12px">Not monitoring this feed.</div>'
-      : mine.length ? `<div class="feed">${mine.map(i => feedItem(i, fresh.has(i.id))).join('')}</div>`
-      : '<div class="empty" style="padding:12px">No incidents yet. Sightline is watching.</div>')
+    setHTML($('#ov-side', main), (mine.length ? `<div class="feed">${mine.map(i => feedItem(i, fresh.has(i.id))).join('')}</div>`
+      : feedAll.length ? '<div class="empty" style="padding:12px">No incidents match this filter. Widen the period or lower the severity.</div>'
+      : `<div class="empty" style="padding:12px">${live ? 'No incidents yet. Sightline is watching.' : 'Not monitoring this feed.'}</div>`)
       + (tags.length ? `<div class="side-h">Your tags</div><div class="feed">${tags.map(tg => tagItemHTML(tg, `data-action="tag-open" data-id="${esc(src.id)}" data-frac="${esc(tg.frac ?? 0)}"`)).join('')}</div>` : ''));
     const sc = S.scrub && S.scrub.id === src.id && S.scrub.seg ? S.scrub : null;
     setHTML($('#ov-tagbar', main), sc
       ? tagFormHTML({ source: src.id, video: '#ov-player video', segment: sc.seg.source_uri, tstart: sc.seg.t_start, tend: sc.seg.t_end, frac: sc.frac })
       : '<div class="tag-hint">To tag a moment yourself, drag the timeline to it.</div>');
+    const n = mine.length;
+    setHTML($('#ov-report', main), `<button class="btn primary" data-nav="/report?${esc(filterQuery(S.filter))}"${n ? '' : ' disabled'}>Build report from ${n === 1 ? 'this incident' : `these ${n} incidents`}</button>`);
     if (!DRAG) setHTML($('#ov-timeline', main), timelineHTML(src, mine, tags));
   },
 };
@@ -594,7 +789,7 @@ VIEWS.source = {
           <span class="tag">${esc(feedState(src0))}</span></h1>
         <div class="meta">${esc(d.camera_id)} · ${esc(d.segment_count ?? '?')} segments${cl && cl.camera_type ? ' · ' + esc(cl.camera_type) + ' camera' : ''}</div></div>
       <div class="btn-row">
-        ${monitoring ? `<button class="btn" data-nav="/">Watch</button><button class="btn" data-action="monitor-stop" data-id="${esc(d.id)}">Pause</button>`
+        ${monitoring ? `<button class="btn" data-nav="/monitor?cams=${enc(d.id)}">Watch</button><button class="btn" data-action="monitor-stop" data-id="${esc(d.id)}">Pause</button>`
                      : addMonitorInline(d.id, true)}
         ${isFeed(d) ? `<button class="btn danger" data-action="remove-feed" data-id="${esc(d.id)}" title="Stop monitoring and clear this feed's incidents and configuration">Remove feed</button>` : ''}
       </div></div>`);
@@ -661,7 +856,7 @@ VIEWS.incident = {
 
     main.innerHTML = `<div class="stack">
       <div class="page-h">
-        <button class="back" data-nav="/source/${enc(inc.source_id)}">← ${esc(sourceLabel(inc.source_id))}</button>
+        <button class="back" data-nav="/monitor?${esc(filterQuery(S.filter))}">← Monitor</button>
         <div class="grow"><h1>${esc(inc.title)} ${sevPill(inc.severity)}${inc.mode === 'rules_only' ? '<span class="tag warn">rules-only</span>' : ''}</h1>
           <div class="meta">${esc(inc.camera_id || '')} · in ${esc(fmtTC(inc.started_at))} · peak ${esc(fmtTC(inc.peak_at))} · out ${esc(fmtTC(inc.ended_at))} · raised automatically ${esc(clock(inc.created_at))}</div></div>
         <div class="conf-box" title="Weighted combination of the components in the Confidence pane">
@@ -773,9 +968,9 @@ VIEWS.search = {
         <input type="text" name="q" placeholder="forklift close to a worker" value="${esc(r.q)}">
         <select name="source"><option value="">All cameras</option>${S.sources.map(s => `<option value="${esc(s.id)}" ${s.id === r.source ? 'selected' : ''}>${esc(s.label || s.camera_id)}</option>`).join('')}</select>
         <button class="btn primary">Search</button></form>
-      <div class="small muted" style="margin-top:8px">Find any footage in the VAST archive, then <b>Add to Monitor</b>: Sightline works out what the feed shows, decides what to watch for, writes its own prompt and starts monitoring. No rules or queries to write.</div>`,
+      <div class="small muted" style="margin-top:8px">Find any moment in the VAST archive. On a camera that is already one of your feeds, <b>Review in Monitor</b> opens it with its incidents. On any other camera, <b>Add to Monitor</b>: Sightline works out what the feed shows, decides what to watch for, writes its own prompt and starts monitoring. No rules or queries to write.</div>`,
       { right: 'VAST hybrid search · Cosmos-Embed1' })}
-      ${pane('Results', '<div class="empty">Enter a query.</div>', { id: 'search-results' })}</div>`;
+      ${pane('Results', '<div class="empty">Describe a moment to find it, for example “forklift close to a worker”.</div>', { id: 'search-results' })}</div>`;
     $('#search-form', main).addEventListener('submit', e => {
       e.preventDefault();
       const f = new FormData(e.target);
@@ -787,15 +982,175 @@ VIEWS.search = {
     const box = $('#search-results', main);
     box.innerHTML = '<div class="empty">Searching…</div>';
     try {
+      if (!S.sources.length) {
+        try {
+          const [sources, incidents] = await Promise.all([GET('api/sources'), GET('api/incidents')]);
+          S.sources = sources;
+          S.incidents = dedupeIncidents(incidents);
+        } catch (_) { /* buttons fall back to Add to Monitor */ }
+      }
       const res = await GET(`api/search?q=${enc(q)}${source ? '&source=' + enc(source) : ''}`);
       const hits = Array.isArray(res) ? res : (res && res.results) || [];
+      const watched = id => isFeed(sourceById(id));
+      const review = id => `<div class="btn-row" style="margin-top:8px"><button class="btn primary" data-nav="/monitor?${esc(filterQuery({ ...DEFAULT_FILTER, cams: [id] }))}&from=${enc(q)}">Review in Monitor</button></div>`;
       box.innerHTML = hits.length ? `<div class="results">${hits.map(h => `<div class="rel">${player(h)}
         <div class="mono small" style="margin-top:4px">${esc(h.camera_id || '')} · ${esc(fmtTC(h.t_start))}${h.similarity != null ? ' · ' + pct(h.similarity) : ''}</div>
         <div>${esc(String(h.caption || '').slice(0, 200))}</div>
-        ${h.camera_id ? addMonitorButton(h.camera_id, false, h.original_video) : ''}</div>`).join('')}</div>` : '<div class="empty">No matches.</div>';
-    } catch (e) { box.innerHTML = `<div class="empty">Search failed: ${esc(e.message)}</div>`; }
+        ${!h.camera_id ? '' : watched(h.camera_id) ? review(h.camera_id) : addMonitorButton(h.camera_id, false, h.original_video)}</div>`).join('')}</div>`
+        : `<div class="empty">No footage matched “${esc(q)}”${source ? ' on this camera' : ''}. Try fewer words, describe what is visible${source ? ', or search all cameras' : ''}.</div>`;
+    } catch (e) { box.innerHTML = `<div class="empty">Search failed: ${esc(e.message)}. Check the VSS light in the top bar, then search again.</div>`; }
   },
 };
+
+// ----- safety report: scope + saved list on the left, the selected report summarized in the main pane
+VIEWS.report = {
+  seq: 0,
+  busy: false,
+  cache: {},
+  shown: null,
+  more: false,
+  mount(main) {
+    this.shown = null;
+    this.more = false;
+    main.innerHTML = `<div class="rp-layout">
+      <div class="stack">
+        ${pane('New report', '<div id="rb-filter"></div><div id="rb-count" class="rb-count"></div><div id="rb-actions"></div>')}
+        ${pane('Saved reports', '<div class="empty" style="padding:12px">Loading…</div>', { id: 'rb-saved', flush: true })}
+      </div>
+      <section class="pane rp-view" id="rp-view"></section>
+    </div>`;
+  },
+  async update(main) {
+    setHTML($('#rb-filter', main), filterBarHTML(S.filter, 'report'));
+    await Promise.all([this.preview(main), this.saved(main), this.view(main)]);
+  },
+  async preview(main) {
+    const seq = ++this.seq;
+    let p;
+    try { p = await GET('api/reports/preview?' + previewQuery(S.filter)); }
+    catch (e) { setHTML($('#rb-count', main), `<span class="muted">Could not count matching incidents: ${esc(e.message)}</span>`); return; }
+    if (seq !== this.seq) return;
+    const n = p.count || 0, st = p.stats || {};
+    const cams = Object.keys(st.by_camera || {}).length;
+    setHTML($('#rb-count', main), n
+      ? `<b>${n} incident${n > 1 ? 's' : ''}</b> match: ${esc(sevWords(st.by_severity))}, on ${cams} camera${cams > 1 ? 's' : ''}.`
+      : '<span class="muted">No incidents match. Widen the period or lower the severity.</span>');
+    setHTML($('#rb-actions', main), this.busy
+      ? `<div class="btn-row"><button class="btn primary" disabled>Generating report…</button></div><div class="small muted" style="margin-top:6px">Sightline is writing the summary, findings and recommended actions. This can take up to a minute.</div>`
+      : `<div class="btn-row"><button class="btn primary" data-action="report-generate"${n ? '' : ' disabled'}>Generate report</button></div>`);
+  },
+  async saved(main) {
+    let list;
+    try { list = await GET('api/reports'); } catch (e) { setHTML($('#rb-saved', main), `<div class="empty" style="padding:12px">Saved reports unavailable: ${esc(e.message)}</div>`); return; }
+    setHTML($('#rb-saved', main), list.length ? `<div class="feed">${list.map(r => {
+      const sc = scopeText(r.filter || {});
+      const n = (r.stats && r.stats.total) || 0;
+      return `<div class="feed-item ${r.id === S.route.id ? 'on' : ''}" data-action="report-open" data-id="${esc(r.id)}" aria-current="${r.id === S.route.id}">
+        <span class="sev-dot ${r.stats && r.stats.by_severity && r.stats.by_severity.critical ? 'critical' : ''}"></span>
+        <div style="min-width:0"><div class="ft">${esc(r.title || 'Safety report')}</div>
+          <div class="fs">${n} incident${n === 1 ? '' : 's'} · ${esc(sc.period)} · ${esc(sc.sev)}${r.mode === 'rules_only' ? ' · rules-only' : ''}</div></div>
+        <span class="fs">${esc(fmtDateTime(r.generated_at))}</span></div>`;
+    }).join('')}</div>` : '<div class="empty" style="padding:12px">No reports yet. Set a scope and choose Generate report.</div>');
+  },
+  async view(main) {
+    const box = $('#rp-view', main);
+    const id = S.route.id;
+    if (!id) {
+      setHTML(box, `<div class="rp-empty"><div class="big">No report open</div>
+        <p>Pick a saved report, or set a scope and choose Generate report. The summary opens here.</p></div>`);
+      return;
+    }
+    if (!this.cache[id]) {
+      if (this.shown !== id) setHTML(box, '<div class="rp-empty"><p>Loading report…</p></div>');
+      try { this.cache[id] = await GET(`api/reports/${enc(id)}`); }
+      catch (e) { setHTML(box, `<div class="rp-empty"><div class="big">Report unavailable</div><p>${esc(e.message)}</p></div>`); return; }
+      if (S.route.id !== id) return;
+    }
+    if (this.shown !== id) { this.shown = id; this.more = false; }
+    setHTML(box, reportSummaryHTML(this.cache[id], this.more));
+  },
+  open(id) {
+    if (S.route.name !== 'report') { nav('/report/' + enc(id)); return; }
+    S.route.id = id;
+    const q = filterQuery(S.filter);
+    history.replaceState(null, '', `#/report/${enc(id)}${q ? '?' + q : ''}`);
+    const main = $('#main');
+    this.saved(main);
+    this.view(main);
+  },
+  async generate() {
+    if (this.busy) return;
+    this.busy = true;
+    const main = $('#main');
+    this.preview(main);
+    try {
+      const { job_id } = await POST('api/reports', reportRequest(S.filter));
+      const rep = await waitJob(job_id, 150000);
+      if (!rep || !rep.id) throw new Error('the report job returned nothing');
+      this.cache[rep.id] = rep;
+      toast('Report generated', 'info');
+      this.open(rep.id);
+    } finally {
+      this.busy = false;
+      this.preview(main);
+    }
+  },
+};
+
+const REPORT_LIST_MAX = 6;
+
+/** The report as a workspace summary: scope, counts, narrative, cited findings and actions, incidents. */
+function reportSummaryHTML(r, more) {
+  const incs = r.incidents || [];
+  const num = new Map(incs.map((i, k) => [i.id, k + 1]));
+  const sc = scopeText(r.filter || {});
+  const st = r.stats || {};
+  const bySev = st.by_severity || {};
+  const cams = Object.keys(st.by_camera || {});
+  const refs = ids => {
+    const list = [...new Set(ids || [])].filter(id => num.has(id)).sort((a, b) => num.get(a) - num.get(b));
+    return list.length ? `<span class="rp-refs">${list.map(id => {
+      const i = incs[num.get(id) - 1];
+      return `<button class="rp-ref ${esc(i.severity)}" data-nav="/incident/${enc(id)}" title="${esc(i.title)}">#${num.get(id)}</button>`;
+    }).join('')}</span>` : '';
+  };
+  const fig = (n, label, cls = '') => `<div class="rp-fig ${cls}"><b>${esc(n)}</b><span>${esc(label)}</span></div>`;
+  const shown = more ? incs : incs.slice(0, REPORT_LIST_MAX);
+  const monitorCam = cams.length === 1 ? cams[0] : null;
+  const by = r.mode === 'rules_only' ? 'Written from the incident records (no language model)' : `Written by Sightline with ${r.model || 'a language model'}`;
+
+  return `<header class="pane-h"><span class="pt">Report</span><span class="pr mono">${esc(r.id)}</span></header>
+    <div class="rp-body">
+      <div class="rp-head">
+        <div class="grow">
+          <h2>${esc(r.title || 'Safety report')}</h2>
+          <div class="rp-meta">${esc(sc.cams)} · raised ${esc(sc.period.toLowerCase() === 'all time' ? 'any time' : sc.period)} · ${esc(sc.sev)}</div>
+          <div class="rp-meta">Generated ${esc(fmtDateTime(r.generated_at))} · ${esc(by)}</div>
+        </div>
+        ${monitorCam ? `<button class="btn" data-nav="/monitor?${esc(filterQuery({ ...fromReportFilter(r.filter), cams: [monitorCam] }))}">Review in Monitor</button>` : ''}
+      </div>
+      <div class="rp-figs">
+        ${fig(st.total || 0, st.total === 1 ? 'incident' : 'incidents')}
+        ${['critical', 'high', 'medium', 'low'].filter(k => bySev[k]).map(k => fig(bySev[k], SEV_LABEL[k].toLowerCase(), k)).join('')}
+        ${fig(cams.length, cams.length === 1 ? 'camera' : 'cameras')}
+      </div>
+      <p class="rp-summary">${esc(r.summary || '')}</p>
+      ${(r.findings || []).length || (r.recommendations || []).length ? `<div class="rp-cols">
+        <section><h3>Findings</h3>${(r.findings || []).length ? `<ul class="rp-list">${r.findings.map(f =>
+          `<li><span>${esc(f.statement)}</span>${refs(f.incident_ids)}</li>`).join('')}</ul>` : '<div class="muted small">No findings.</div>'}</section>
+        <section><h3>Recommended actions</h3>${(r.recommendations || []).length ? `<ul class="rp-list">${r.recommendations.map(a =>
+          `<li><span>${esc(a.action)}</span>${refs(a.incident_ids)}</li>`).join('')}</ul>` : '<div class="muted small">No actions.</div>'}</section>
+      </div>` : ''}
+      ${incs.length ? `<section class="rp-incs"><h3>Incidents <span class="muted">${incs.length}</span></h3>
+        <div class="feed">${shown.map(i => `<div class="feed-item" data-nav="/incident/${enc(i.id)}">
+          <span class="sev-dot ${esc(i.severity)}"></span>
+          <div style="min-width:0"><div class="ft"><span class="rp-num">#${num.get(i.id)}</span>${esc(i.title)}</div>
+            <div class="fs">${esc(sourceLabel(i.camera_id || i.source_id))} · raised ${esc(fmtDateTime(i.created_at))}</div></div>
+          <span class="fc">${i.confidence != null ? pct(i.confidence) : ''}</span></div>`).join('')}</div>
+        ${incs.length > REPORT_LIST_MAX ? `<button class="linkbtn rp-more" data-action="report-more">${more ? 'Show fewer' : `Show all ${incs.length} incidents`}</button>` : ''}
+      </section>` : '<div class="muted">No incidents matched this scope.</div>'}
+    </div>`;
+}
 
 // ----- import: upload any clip; Sightline configures itself on it and puts markers on its timeline
 VIEWS.new = {
@@ -1198,9 +1553,11 @@ function parseRoute() {
   if (parts[0] === 'source' && parts[1]) return { name: 'source', id: decodeURIComponent(parts[1]) };
   if (parts[0] === 'incident' && parts[1]) return { name: 'incident', id: decodeURIComponent(parts[1]) };
   if (parts[0] === 'search') return { name: 'search', q: q.get('q') || '', source: q.get('source') || '' };
+  if (parts[0] === 'monitor') return { name: 'overview', filter: filterFromQuery(q), from: q.get('from') || '' };
+  if (parts[0] === 'report') return { name: 'report', id: parts[1] ? decodeURIComponent(parts[1]) : null, filter: filterFromQuery(q) };
   if (parts[0] === 'new') return { name: 'new' };
   if (parts[0] === 'live') return { name: 'live' };
-  return { name: 'overview' };
+  return { name: 'home' };
 }
 // Set only the hash: with a runtime <base>, href="#..." links would navigate to the base URL instead.
 function nav(path) { location.hash = '#' + path; }
@@ -1208,6 +1565,7 @@ function nav(path) { location.hash = '#' + path; }
 async function render() {
   if (S.route.name === 'live') VIEWS.live.stop();
   S.route = parseRoute();
+  if (S.route.filter) S.filter = S.route.filter;
   const main = $('#main');
   main._html = null;
   main.innerHTML = '<div class="empty">Loading…</div>';
@@ -1232,7 +1590,7 @@ function armed(el, prompt) {
 
 const ACTIONS = {
   'select-source': el => { S.selected = el.dataset.id; S.scrub = null; },
-  'open-feed': el => { S.selected = el.dataset.id; S.scrub = null; const m = $('#main'); if (S.route.name === 'overview' && m) VIEWS.overview.update(m); else nav('/'); },
+  'open-feed': el => { S.selected = el.dataset.id; S.scrub = null; const m = $('#main'); if (S.route.name === 'overview' && m) VIEWS.overview.update(m); else nav('/monitor'); },
   'open-upload': el => { S.fresh = { sid: el.dataset.sid }; if (S.route.name === 'new') { VIEWS.new.mount($('#main')); VIEWS.new.update($('#main')); } else nav('/new'); },
   'remove-feed': async el => {
     if (!armed(el, 'Click again to remove')) return;
@@ -1240,7 +1598,7 @@ const ACTIONS = {
     if (S.selected === el.dataset.id) S.selected = null;
     S.scrub = null;
     toast('Feed removed. Its footage stays searchable in the archive.', 'info');
-    if (S.route.name !== 'overview') nav('/');
+    if (S.route.name !== 'overview') nav('/monitor');
   },
   'remove-upload': async el => {
     if (!armed(el, 'Click again to remove')) return;
@@ -1254,7 +1612,7 @@ const ACTIONS = {
     await DEL('api/feeds');
     S.selected = null; S.scrub = null; S.fresh = null;
     toast('All feeds cleared', 'info');
-    nav('/');
+    nav('/monitor');
   },
   'toggle-how': el => { S.showHow = !S.showHow; const h = $('#sv-how'); if (h) h.hidden = !S.showHow; el.textContent = S.showHow ? 'Hide details' : 'Show how Sightline configured this feed'; },
   'scrub-clear': () => { S.scrub = null; const b = $('#ov-player'); if (b) b._html = null; },
@@ -1298,7 +1656,34 @@ const ACTIONS = {
   'nf-open': el => { S.fresh = { sid: el.dataset.sid }; VIEWS.new.showPreview($('#main')); },
   'live-start': () => VIEWS.live.start(),
   'live-stop': () => VIEWS.live.stop(),
+  'report-generate': () => VIEWS.report.generate(),
+  'report-open': el => VIEWS.report.open(el.dataset.id),
+  'report-more': () => { VIEWS.report.more = !VIEWS.report.more; VIEWS.report.view($('#main')); },
 };
+
+/** Filter forms (Monitor, Report, Home): keep the URL in step without a hashchange remount. */
+document.addEventListener('change', e => {
+  const form = e.target.closest && e.target.closest('form[data-filter]');
+  if (!form) return;
+  S.filter = readFilter(form, S.filter);
+  const scope = form.dataset.filter;
+  const main = $('#main');
+  if (scope === 'monitor') {
+    const from = S.route.from ? `&from=${enc(S.route.from)}` : '';
+    history.replaceState(null, '', `#/monitor?${filterQuery(S.filter)}${from}`);
+    S.route.filter = S.filter;
+    VIEWS.overview.update(main);
+  } else if (scope === 'report') {
+    const q = filterQuery(S.filter);
+    history.replaceState(null, '', `#/report${S.route.id ? '/' + enc(S.route.id) : ''}${q ? '?' + q : ''}`);
+    S.route.filter = S.filter;
+    VIEWS.report.update(main);
+  } else if (scope === 'home') {
+    VIEWS.home.update(main);
+  }
+  const again = e.target.name && document.querySelector(`form[data-filter="${scope}"] [name="${CSS.escape(e.target.name)}"]`);
+  if (again && again !== document.activeElement) again.focus();
+});
 
 document.addEventListener('click', async e => {
   const act = e.target.closest('[data-action]');

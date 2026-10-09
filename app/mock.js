@@ -385,6 +385,55 @@
   }
   const LIVE_SCENES = ['A person sits at a desk facing the camera.', 'The person stands up and walks toward the door.', 'A backpack is placed on the chair.', 'The room is empty; the backpack remains on the chair.', 'The person returns and picks up the backpack.'];
 
+  // ---------- safety reports (same shapes as routes_report.py)
+  const reports = {};
+  const reportJobs = {};
+  const SEV_RANK = { low: 0, medium: 1, high: 2, critical: 3 };
+  function reportFilter(o) {
+    return { source_ids: o.source_ids || [], since: o.since || null, until: o.until || null, min_severity: o.min_severity || 'low' };
+  }
+  function reportSelect(f) {
+    const lo = f.since ? Date.parse(f.since) : null, hi = f.until ? Date.parse(f.until) : null;
+    return visibleIncidents()
+      .filter(i => (!f.source_ids.length || f.source_ids.includes(i.source_id))
+        && SEV_RANK[i.severity] >= (SEV_RANK[f.min_severity] || 0)
+        && (lo == null || Date.parse(i.created_at) >= lo) && (hi == null || Date.parse(i.created_at) <= hi))
+      .sort((a, b) => SEV_RANK[b.severity] - SEV_RANK[a.severity] || String(a.created_at).localeCompare(String(b.created_at)));
+  }
+  function reportStats(incs) {
+    const tally = key => incs.reduce((m, i) => { const k = key(i); m[k] = (m[k] || 0) + 1; return m; }, {});
+    const sev = tally(i => i.severity);
+    const times = incs.map(i => i.created_at).sort();
+    return { total: incs.length, by_severity: Object.fromEntries(['critical', 'high', 'medium', 'low'].filter(k => sev[k]).map(k => [k, sev[k]])),
+      by_camera: tally(i => i.camera_id), by_event_type: tally(i => i.event_type), first_at: times[0] || null, last_at: times[times.length - 1] || null };
+  }
+  function buildReport(f) {
+    const incs = reportSelect(f), stats = reportStats(incs);
+    const cams = Object.keys(stats.by_camera).map(c => (SOURCES.find(s => s.id === c) || {}).label || c);
+    const byType = {};
+    incs.forEach(i => { (byType[i.event_type] = byType[i.event_type] || []).push(i.id); });
+    const id = 'rpt-mock' + (++jobSeq);
+    reports[id] = {
+      id, filter: f, generated_at: iso(Date.now()), stats, mode: 'llm', model: 'mock-model',
+      title: !cams.length ? 'Safety report' : cams.length <= 2 ? 'Safety report: ' + cams.join(' and ') : `Safety report: ${cams.length} cameras`,
+      summary: incs.length
+        ? `Sightline raised ${incs.length} incident${incs.length > 1 ? 's' : ''} on ${cams.length} camera${cams.length > 1 ? 's' : ''}. Most involved people and vehicles sharing the same space with nothing separating them.`
+        : 'No incidents were raised for this scope.',
+      findings: Object.entries(byType).slice(0, 5).map(([t, ids]) => ({ statement: `${ids.length} incident${ids.length > 1 ? 's' : ''} of ${t.replace(/_/g, ' ')}.`,
+        incident_ids: ids, why_it_matters: 'Repeated events of the same kind point to a condition at the site, not a one-off.' })),
+      recommendations: incs.filter(i => i.recommended_action).slice(0, 4).map(i => ({ action: i.recommended_action, incident_ids: [i.id] })),
+      incident_ids: incs.map(i => i.id),
+      incidents: incs.map(i => {
+        const ev = (i.evidence || []).find(e => e.role === 'event') || {};
+        return { id: i.id, source_id: i.source_id, camera_id: i.camera_id, title: i.title, severity: i.severity, confidence: i.confidence.value,
+          verdict: i.investigation.verdict, event_type: i.event_type, objective_id: i.objective_id, location: i.location, created_at: i.created_at,
+          started_at: i.started_at, peak_at: i.peak_at, ended_at: i.ended_at, replay_pos: i.replay_pos, summary: i.summary,
+          recommended_action: i.recommended_action, caption: ev.caption || '', segment: ev.segment || '', mode: i.mode };
+      }),
+    };
+    return reports[id];
+  }
+
   // ---------- router
   const TAGS = [];
   function route(method, path, body) {
@@ -476,7 +525,32 @@
         .map(h => { const c = h.caption.toLowerCase(); const hits = words.filter(w => c.includes(w)).length; return Object.assign(h, { similarity: words.length ? Math.min(0.92, 0.35 + 0.6 * hits / words.length) : 0.3, _h: hits }); })
         .filter(h => h._h > 0).sort((a, b) => b.similarity - a.similarity).slice(0, 9);
     }
+    if (r[0] === 'reports') {
+      if (r[1] === 'preview') {
+        const incs = reportSelect(reportFilter({ source_ids: (q.get('sources') || '').split(',').filter(Boolean),
+          since: q.get('since'), until: q.get('until'), min_severity: q.get('min_severity') }));
+        return { count: incs.length, stats: reportStats(incs) };
+      }
+      if (method === 'POST') {
+        const jid = 'rptjob-' + (++jobSeq);
+        reportJobs[jid] = { t0: Date.now(), filter: reportFilter(body || {}) };
+        return { job_id: jid };
+      }
+      if (!r[1]) {
+        return Object.values(reports).sort((a, b) => b.generated_at.localeCompare(a.generated_at))
+          .map(x => ({ id: x.id, title: x.title, generated_at: x.generated_at, filter: x.filter, stats: x.stats, mode: x.mode }));
+      }
+      const rep = reports[decodeURIComponent(r[1])];
+      if (!rep) throw new Error('404 report not found');
+      return clone(rep);
+    }
     if (r[0] === 'jobs' && r[1]) {
+      const rj = reportJobs[decodeURIComponent(r[1])];
+      if (rj) {
+        if (since(rj.t0) < 2500) return { id: r[1], status: 'running' };
+        if (!rj.result) rj.result = buildReport(rj.filter);
+        return { id: r[1], status: 'done', result: clone(rj.result) };
+      }
       const j = genericJobs[decodeURIComponent(r[1])];
       if (!j) return { id: r[1], status: 'done' };
       return newsourceJob(j);

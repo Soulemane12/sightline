@@ -730,6 +730,76 @@ class PatternsLLMResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Safety report
+# ---------------------------------------------------------------------------
+
+
+class ReportFilter(BaseModel):
+    """Which incidents a report covers. since/until bound when Sightline raised the incident."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    source_ids: list[str] = Field(default_factory=list)
+    since: Optional[str] = None
+    until: Optional[str] = None
+    min_severity: Severity = "low"
+
+
+class ReportFinding(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    statement: str
+    incident_ids: list[str] = Field(default_factory=list)
+    why_it_matters: str = ""
+
+
+class ReportRecommendation(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    action: str
+    incident_ids: list[str] = Field(default_factory=list)
+
+
+class ReportStats(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    total: int = 0
+    by_severity: dict[str, int] = Field(default_factory=dict)
+    by_camera: dict[str, int] = Field(default_factory=dict)
+    by_event_type: dict[str, int] = Field(default_factory=dict)
+    first_at: Optional[str] = None
+    last_at: Optional[str] = None
+
+
+class ReportNarrative(BaseModel):
+    """REPORT LLM shape (and the rules-only fallback)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    summary: str = ""
+    findings: list[ReportFinding] = Field(default_factory=list)
+    recommendations: list[ReportRecommendation] = Field(default_factory=list)
+
+
+class SafetyReport(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    filter: ReportFilter
+    generated_at: str = Field(default_factory=_now_iso)
+    title: str = ""
+    stats: ReportStats = Field(default_factory=ReportStats)
+    summary: str = ""
+    findings: list[ReportFinding] = Field(default_factory=list)
+    recommendations: list[ReportRecommendation] = Field(default_factory=list)
+    incident_ids: list[str] = Field(default_factory=list)
+    # Snapshot of each incident at generation time, so the report stays a fixed record.
+    incidents: list[dict[str, Any]] = Field(default_factory=list)
+    mode: ClassifyMode = "llm"
+    model: str = ""
+
+
+# ---------------------------------------------------------------------------
 # VSS explore → VideoRef helper
 # ---------------------------------------------------------------------------
 
@@ -791,7 +861,13 @@ __all__ = [
     "ReingestJob",
     "ReingestProgress",
     "ReingestVerify",
+    "ReportFilter",
+    "ReportFinding",
+    "ReportNarrative",
+    "ReportRecommendation",
+    "ReportStats",
     "RuleCall",
+    "SafetyReport",
     "SecondLook",
     "Signal",
     "StateHealth",

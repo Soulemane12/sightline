@@ -32,6 +32,7 @@ KINDS = (
     "evolution",
     "meta",
     "tag",
+    "report",
 )
 
 
