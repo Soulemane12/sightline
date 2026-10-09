@@ -10,3 +10,7 @@ app/seed_state.json
 __pycache__/
 *.pyc
 .DS_Store
+
+# Local tooling (VM may lack system venv/pip)
+.venv/
+venv/
