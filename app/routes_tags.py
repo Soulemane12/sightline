@@ -1,8 +1,9 @@
 """Manual tags: a person marks a moment on a feed or an uploaded clip and says what happened.
 
-The tag is stored as-is (it is the human's claim). Sightline then takes its own look: the clip and
-the note go to Cosmos as a YES / NO / UNCLEAR question, and the answer is shown next to the tag.
-It never overwrites the note.
+The tag is stored as-is (it is the human's claim) and raised as an incident marked "reported by you".
+Sightline then takes its own look: the clip and the note go to Cosmos as a YES / NO / UNCLEAR
+question. The answer is shown next to the tag and sets the incident's confidence; it never
+overwrites the note, and a NO leaves the report open (unclear) rather than dismissing the person.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import logging
 import os
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -46,10 +47,69 @@ class TagIn(BaseModel):
     t_end: Optional[float] = None
     frac: Optional[float] = None       # feed: position on the feed timeline (0..1)
     area: Optional[Area] = None        # optional box: where Sightline should look
+    severity: Literal["critical", "high", "medium", "low"] = "high"
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# Confidence of a reported incident: the person's report, then Cosmos's own look at the clip.
+REPORT_WEIGHT, LOOK_WEIGHT = 0.4, 0.6
+LOOK_VALUE = {"YES": 0.95, "UNCLEAR": 0.5, "NO": 0.1}
+LOOK_VERDICT = {"YES": "confirmed", "UNCLEAR": "unclear", "NO": "unclear"}
+
+
+def _confidence(tag: dict[str, Any], check: Optional[dict[str, Any]]) -> dict[str, Any]:
+    comps = [{"name": "Reported by a person", "value": 0.6, "weight": REPORT_WEIGHT,
+              "explanation": f"Tagged by hand: \"{tag['note']}\""}]
+    v = (check or {}).get("verdict")
+    if v in LOOK_VALUE:
+        comps.append({"name": "Cosmos direct look", "value": LOOK_VALUE[v], "weight": LOOK_WEIGHT,
+                      "explanation": (check or {}).get("text") or v})
+    total = sum(c["weight"] for c in comps)
+    return {"value": round(sum(c["value"] * c["weight"] for c in comps) / total, 3), "components": comps}
+
+
+def _incident(tag: dict[str, Any]) -> dict[str, Any]:
+    """The tag as an incident (same shape as Sightline's own), clearly marked as a person's report."""
+    from models import Incident
+    store = get_store()
+    sid = tag["source_id"]
+    meta = store.get("source", sid) or {}
+    domain = (store.get_classification(sid) or {}).get("domain") or "general"
+    if sid.startswith("upload-"):
+        t = float(tag.get("t") or 0.0)
+        a, b = max(0.0, t - 1.5), t + 2.5
+        ev = {"role": "event", "segment": f"upload://{sid}", "t_start": a, "t_end": b,
+              "clip_url": f"api/newsource/{sid}/video#t={a:.2f},{b:.2f}", "caption": f"Reported: {tag['note']}"}
+        start, peak, end = a, t, b
+    else:
+        a, b = float(tag.get("t_start") or 0.0), float(tag.get("t_end") or 0.0)
+        ev = {"role": "event", "segment": tag.get("segment") or "", "t_start": a, "t_end": b,
+              "caption": f"Reported: {tag['note']}"}
+        start, peak, end = a, (a + b) / 2, b
+    where = f" Look at the {area_words(tag['area'])} part of the frame." if tag.get("area") else ""
+    inc = Incident(
+        id=f"inc-{tag['id']}", source_id=sid, domain=domain, objective_id="manual_report", event_type="manual_report",
+        title=tag["note"][:120], severity=tag.get("severity") or "high", confidence=_confidence(tag, None),
+        summary=f"Reported by a person while reviewing the footage.{where}",
+        started_at=start, peak_at=peak, ended_at=end, camera_id=meta.get("camera_id") or sid,
+        location=meta.get("location") or "", evidence=[ev],
+        investigation={"verdict": "unclear", "why_flagged": f"A person tagged this moment: \"{tag['note']}\"",
+                       "peak_segment": ev["segment"], "title": tag["note"][:120]},
+        recommended_action="Review the clip and confirm with the person who reported it.",
+        replay_pos=tag.get("frac"),
+    ).model_dump()
+    return {**inc, "origin": "manual", "reported_by": "you", "tag_id": tag["id"]}
+
+
+def _sync_upload_count(sid: str) -> None:
+    store = get_store()
+    meta = store.get("source", sid)
+    if meta and isinstance(meta.get("upload"), dict):
+        store.put("source", sid, {**meta, "upload": {**meta["upload"], "incidents": len(store.list_incidents(source_id=sid))}},
+                  source_id=sid)
 
 
 def area_words(a: dict[str, float]) -> str:
@@ -122,6 +182,16 @@ async def _check(tag_id: str) -> None:
     if tag:
         store.put("tag", tag_id, {**tag, "check": {**check, "at": _now(), "by": "Cosmos (direct look)"}},
                   source_id=tag["source_id"])
+        inc = store.get("incident", tag.get("incident_id") or "")
+        if inc:
+            inv = dict(inc.get("investigation") or {})
+            if check.get("verdict"):
+                inv["verdict"] = LOOK_VERDICT.get(check["verdict"], "unclear")
+                inv["second_look"] = {"verdict": check["verdict"], "text": check.get("text") or ""}
+            else:
+                inv["counter_evidence"] = check.get("text") or ""
+            store.put("incident", inc["id"], {**inc, "investigation": inv, "confidence": _confidence(tag, check)},
+                      source_id=tag["source_id"])
 
 
 @router.post("/api/tags")
@@ -131,7 +201,11 @@ async def api_tag_create(body: TagIn) -> dict[str, Any]:
         raise HTTPException(404, "unknown feed")
     tag = {"id": "tag-" + uuid.uuid4().hex[:10], **body.model_dump(), "note": body.note.strip(),
            "created_at": _now(), "check": {"status": "checking"}}
+    inc = _incident(tag)
+    tag["incident_id"] = inc["id"]
     store.put("tag", tag["id"], tag, source_id=body.source_id)
+    store.put("incident", inc["id"], inc, source_id=body.source_id)
+    _sync_upload_count(body.source_id)
     task = asyncio.create_task(_check(tag["id"]))
     _TASKS.add(task)
     task.add_done_callback(_TASKS.discard)
@@ -146,5 +220,12 @@ async def api_tags(source_id: Optional[str] = Query(None)) -> list[dict[str, Any
 
 @router.delete("/api/tags/{tag_id}")
 async def api_tag_delete(tag_id: str) -> dict[str, Any]:
-    get_store().delete_local("tag", tag_id)
+    """Removes the tag and the incident it raised."""
+    store = get_store()
+    tag = store.get("tag", tag_id) or {}
+    store.delete_local("tag", tag_id)
+    if tag.get("incident_id"):
+        store.delete_local("incident", tag["incident_id"])
+    if tag.get("source_id"):
+        _sync_upload_count(tag["source_id"])
     return {"ok": True, "id": tag_id}

@@ -88,3 +88,58 @@ def test_area_steers_the_question():
     q = routes_tags._question({"note": "swimmer goes under", "t": 6.2, "area": {"x": 0.05, "y": 0.1, "w": 0.2, "h": 0.2}})
     assert "upper left part of the frame" in q and "5% to 25% from the left" in q and "show this there" in q
     assert "Look specifically" not in routes_tags._question({"note": "x", "t": 1.0})
+
+
+def test_tag_raises_an_incident_that_the_check_updates_and_delete_removes(monkeypatch):
+    st = _store(monkeypatch)
+    st.put("source", "cam-a", {"id": "cam-a", "camera_id": "cam-a", "status": "monitoring"}, source_id="cam-a")
+    st.put("classification", "cam-a", {"domain": "traffic"}, source_id="cam-a")
+
+    async def fake_bytes(tag):
+        return b"\x00"
+
+    class GPU:
+        async def cosmos_chat(self, messages, **kw):
+            return "VERDICT: YES\nWHY: A pedestrian steps in front of the car."
+
+    monkeypatch.setattr(routes_tags, "_clip_bytes", fake_bytes)
+    import gpu_client
+    monkeypatch.setattr(gpu_client, "get_gpu", lambda: GPU())
+
+    async def go():
+        tag = await routes_tags.api_tag_create(routes_tags.TagIn(
+            source_id="cam-a", note="pedestrian steps in front of car", segment="s3://x/seg-3.mp4",
+            t_start=10.0, t_end=15.0, frac=0.4, severity="critical"))
+        inc = st.get("incident", tag["incident_id"])
+        assert inc["origin"] == "manual" and inc["severity"] == "critical" and inc["domain"] == "traffic"
+        assert inc["replay_pos"] == 0.4 and inc["evidence"][0]["segment"] == "s3://x/seg-3.mp4"
+        assert inc["investigation"]["verdict"] == "unclear" and inc["confidence"]["value"] == 0.6
+        await asyncio.gather(*list(routes_tags._TASKS))
+        inc = st.get("incident", tag["incident_id"])
+        assert inc["investigation"]["verdict"] == "confirmed" and inc["investigation"]["second_look"]["verdict"] == "YES"
+        assert inc["confidence"]["value"] == 0.81 and len(inc["confidence"]["components"]) == 2
+        await routes_tags.api_tag_delete(tag["id"])
+        assert st.get("incident", tag["incident_id"]) is None
+    asyncio.run(go())
+
+
+def test_upload_tag_incident_plays_from_the_file_and_counts(monkeypatch):
+    st = _store(monkeypatch)
+    st.put("source", "upload-x", {"id": "upload-x", "camera_id": "upload-x", "upload": {"incidents": 0}}, source_id="upload-x")
+
+    async def boom(tag):
+        raise ValueError("the file is 31 MB; export it at 720p to get Sightline's look")
+
+    monkeypatch.setattr(routes_tags, "_clip_bytes", boom)
+
+    async def go():
+        tag = await routes_tags.api_tag_create(routes_tags.TagIn(source_id="upload-x", note="swimmer goes under", t=6.0))
+        inc = st.get("incident", tag["incident_id"])
+        assert inc["evidence"][0]["clip_url"] == "api/newsource/upload-x/video#t=4.50,8.50"
+        assert st.get("source", "upload-x")["upload"]["incidents"] == 1
+        await asyncio.gather(*list(routes_tags._TASKS))
+        inc = st.get("incident", tag["incident_id"])
+        assert inc["investigation"]["verdict"] == "unclear" and "31 MB" in inc["investigation"]["counter_evidence"]
+        await routes_tags.api_tag_delete(tag["id"])
+        assert st.get("source", "upload-x")["upload"]["incidents"] == 0
+    asyncio.run(go())

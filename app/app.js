@@ -162,7 +162,7 @@ function feedItem(inc, isNew) {
   return `<div class="feed-item ${isNew ? 'new' : ''}" data-nav="/incident/${enc(inc.id)}" title="${esc(SEV_LABEL[inc.severity] || '')} · ${esc(comps)}">
     <span class="sev-dot ${esc(inc.severity)}"></span>
     <div style="min-width:0"><div class="ft">${esc(inc.title)}</div>
-      <div class="fs">${esc(inc.camera_id || sourceLabel(inc.source_id))} · ${esc(fmtTC(inc.peak_at ?? inc.started_at))}${inc.mode === 'rules_only' ? ' · rules-only' : ''}${inc.created_at ? ' · ' + esc(clock(inc.created_at)) : ''}</div></div>
+      <div class="fs">${inc.origin === 'manual' ? '<span class="by-you">Reported by you</span> · ' : ''}${esc(inc.camera_id || sourceLabel(inc.source_id))} · ${esc(fmtTC(inc.peak_at ?? inc.started_at))}${inc.mode === 'rules_only' ? ' · rules-only' : ''}${inc.created_at ? ' · ' + esc(clock(inc.created_at)) : ''}</div></div>
     <span class="fc">${pct(inc.confidence && inc.confidence.value)}</span>
   </div>`;
 }
@@ -869,7 +869,7 @@ VIEWS.incident = {
       <div class="page-h">
         <button class="back" data-nav="/monitor?${esc(filterQuery(S.filter))}">← Monitor</button>
         <div class="grow"><h1>${esc(inc.title)} ${sevPill(inc.severity)}${inc.mode === 'rules_only' ? '<span class="tag warn">rules-only</span>' : ''}</h1>
-          <div class="meta">${esc(inc.camera_id || '')} · in ${esc(fmtTC(inc.started_at))} · peak ${esc(fmtTC(inc.peak_at))} · out ${esc(fmtTC(inc.ended_at))} · raised automatically ${esc(clock(inc.created_at))}</div></div>
+          <div class="meta">${esc(inc.camera_id || '')} · in ${esc(fmtTC(inc.started_at))} · peak ${esc(fmtTC(inc.peak_at))} · out ${esc(fmtTC(inc.ended_at))} · ${inc.origin === 'manual' ? 'reported by you' : 'raised automatically'} ${esc(clock(inc.created_at))}</div></div>
         <div class="conf-box" title="Weighted combination of the components in the Confidence pane">
           <div class="conf-big">${pct(conf.value)}</div><div class="conf-label">confidence · ${esc(inv.verdict || '')}</div></div>
       </div>
@@ -1258,7 +1258,7 @@ VIEWS.new = {
       </div>
       <div class="cols2" style="margin-top:6px">
         ${pane('Cosmos prompt Sightline wrote for this clip', pr ? `<div class="editor"><pre class="prompt-box">${esc(pr.text)}</pre><div class="editor-status"><span class="ok">${esc(pr.chars ?? (pr.text || '').length)}/800</span><span>${pr.template_fallback ? 'template fallback' : 'written by Sightline'}</span></div></div>` : '<div class="empty">Writing…</div>')}
-        ${pane('Markers on the timeline', marks.length ? `<div class="feed">${marks.map(m => m.status === 'tagged' ? tagItemHTML({ id: m.tag_id, note: m.title, t: m.t, check: m.check, area: m.area }, `data-action="nf-seek" data-t="${esc(m.t)}"`) : `<div class="feed-item" ${m.incident_id ? `data-nav="/incident/${enc(m.incident_id)}"` : `data-action="nf-seek" data-t="${esc(m.t_start ?? m.t)}"`}>
+        ${pane('Markers on the timeline', marks.length ? `<div class="feed">${marks.map(m => m.status === 'tagged' ? tagItemHTML({ id: m.tag_id, note: m.title, t: m.t, check: m.check, area: m.area, incident_id: m.incident_id }, `data-action="nf-seek" data-t="${esc(m.t)}"`) : `<div class="feed-item" ${m.incident_id ? `data-nav="/incident/${enc(m.incident_id)}"` : `data-action="nf-seek" data-t="${esc(m.t_start ?? m.t)}"`}>
             <span class="sev-dot ${esc(m.status === 'incident' ? (m.severity || 'medium') : 'low')}"></span>
             <div style="min-width:0"><div class="ft">${esc(m.title)}</div><div class="fs">${esc(fmtT(m.t_start))}–${esc(fmtT(m.t_end))} · ${esc(m.status)}</div></div>
             <span class="fc">${m.confidence != null ? pct(m.confidence) : ''}</span></div>`).join('')}</div>` : '<div class="empty" style="padding:12px">No markers yet.</div>', { flush: true })}
@@ -1361,8 +1361,10 @@ function tagFormHTML(o) {
   const attrs = Object.entries(o).filter(([, v]) => v != null).map(([k, v]) => `data-${k}="${esc(v)}"`).join(' ');
   return `<form class="tagbar" data-tag-form ${attrs}>
     <input name="note" maxlength="300" autocomplete="off" placeholder="Something happened here? Describe what you saw">
+    <select name="sev" title="Severity of the incident this tag raises">
+      <option value="critical">Critical</option><option value="high" selected>High</option><option value="medium">Medium</option><option value="low">Low</option></select>
     <button type="button" class="btn" data-action="tag-area" title="Drag a box on the video around where Sightline should look">Mark area</button>
-    <button class="btn">Tag this moment</button></form>`;
+    <button class="btn">Tag as incident</button></form>`;
 }
 function tagCheckHTML(c) {
   c = c || {};
@@ -1377,8 +1379,9 @@ function tagItemHTML(tg, openAttr) {
   return `<div class="feed-item tag-item" ${openAttr || ''} ${areaAttrs(tg.area, tg.note)}>
     <span class="sev-dot tag"></span>
     <div style="min-width:0"><div class="ft">${esc(tg.note)}</div><div class="fs">Tagged by you${when ? ' · ' + esc(when) : ''}${tg.area ? ' · look at the ' + esc(areaWords(tg.area)) : ''}</div>
-    <div class="fs">${tagCheckHTML(tg.check)}</div></div>
-    <button class="linkbtn" data-action="tag-remove" data-id="${esc(tg.id)}" title="Remove this tag">✕</button></div>`;
+    <div class="fs">${tagCheckHTML(tg.check)}</div>
+    ${tg.incident_id ? `<button class="linkbtn open-inc" data-action="go" data-to="/incident/${esc(tg.incident_id)}">Open incident →</button>` : ''}</div>
+    <button class="linkbtn" data-action="tag-remove" data-id="${esc(tg.id)}" title="Remove this tag and its incident">✕</button></div>`;
 }
 
 // ----- "look here": the person drags a box on the frame; it travels with the tag and steers Sightline's look
@@ -1667,7 +1670,7 @@ const ACTIONS = {
   },
   'tag-remove': async el => {
     await DEL(`api/tags/${enc(el.dataset.id)}`);
-    toast('Tag removed', 'info');
+    toast('Tag and its incident removed', 'info');
     const m = $('#main');
     if (S.route.name === 'new') VIEWS.new.update(m); else if (S.route.name === 'overview') VIEWS.overview.update(m);
   },
@@ -1676,6 +1679,7 @@ const ACTIONS = {
     if (el.dataset.area) showArea($('#ov-player video'), JSON.parse(el.dataset.area), el.dataset.note);
   },
   'tag-area': el => startAreaDraw(el.closest('form')),
+  'go': el => nav(el.dataset.to),
   'nf-open': el => { S.fresh = { sid: el.dataset.sid }; VIEWS.new.showPreview($('#main')); },
   'live-start': () => VIEWS.live.start(),
   'live-stop': () => VIEWS.live.stop(),
@@ -1726,7 +1730,7 @@ document.addEventListener('submit', async e => {
   e.preventDefault();
   const note = (f.note.value || '').trim();
   if (!note) { f.note.focus(); return; }
-  const d = f.dataset, body = { source_id: d.source, note };
+  const d = f.dataset, body = { source_id: d.source, note, severity: (f.sev && f.sev.value) || 'high' };
   if (d.segment) Object.assign(body, { segment: d.segment, t_start: Number(d.tstart), t_end: Number(d.tend), frac: Number(d.frac) });
   else { const v = $('#nf-video'); body.t = v ? v.currentTime : 0; }
   if (S.tagArea && S.tagArea.form === f) body.area = S.tagArea.box;
@@ -1736,9 +1740,8 @@ document.addEventListener('submit', async e => {
     S.tagArea = null;
     const ab = f.querySelector('[data-action="tag-area"]');
     if (ab) ab.textContent = 'Mark area';
-    toast('Tagged. Sightline is taking its own look.', 'info');
-    const m = $('#main');
-    if (S.route.name === 'new') VIEWS.new.update(m); else if (S.route.name === 'overview') VIEWS.overview.update(m);
+    toast('Tagged and added as an incident. Sightline is taking its own look.', 'info');
+    refresh();
   } catch (err) { toast('Tag failed: ' + err.message); }
 });
 
