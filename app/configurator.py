@@ -720,14 +720,22 @@ class Configurator:
         max_chars = prompts.CUSTOM_PROMPT_MAX_CHARS
 
         def _template_prompt() -> CosmosPrompt:
-            text = prompts.short_template(profile.domain)
-            if len(text) > max_chars:
-                text = prompts.ULTRA_SHORT_TEMPLATES.get(profile.domain) or text[: max_chars - 1]
+            # Built from this camera's own objectives: a domain template can miss them entirely
+            # (e.g. a pool classified as "sports" would get the basketball template).
+            objs = [(o.name, o.id) for o in profile.objectives]
+            if objs:
+                text = prompts.objective_prompt(profile.domain, objs, max_chars)
+                rationale = "assembled from the plan's objectives (LLM prompt unavailable or too long)"
+            else:
+                text = prompts.short_template(profile.domain)
+                if len(text) > max_chars:
+                    text = prompts.ULTRA_SHORT_TEMPLATES.get(profile.domain) or text[: max_chars - 1]
+                rationale = "SHORT_TEMPLATES fallback"
             return CosmosPrompt(
                 text=text,
                 chars=len(text),
                 covers=[o.id for o in profile.objectives],
-                rationale="SHORT_TEMPLATES fallback",
+                rationale=rationale,
                 template_fallback=True,
             )
 
@@ -802,7 +810,7 @@ class Configurator:
             text = tp.text
             template_fallback = True
             covers = tp.covers
-            rationale = "trimmed to SHORT_TEMPLATES"
+            rationale = tp.rationale
 
         cosmos = CosmosPrompt(
             text=text,

@@ -21,6 +21,7 @@ const S = {
   offline: false,
   live: null,
   fresh: null,
+  tags: {},
 };
 
 // ---------------------------------------------------------------- utilities
@@ -171,7 +172,7 @@ function domainOf(src) { return src && src.classification ? src.classification.d
 function sortIncidents(list) { return [...list].sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || ''))); }
 
 /** NLE-style timeline: footage track (processed vs pending), incident markers, playhead at the replay clock. */
-function timelineHTML(src, incs) {
+function timelineHTML(src, incs, tags) {
   if (!src) return '<div class="tl-foot">No camera selected.</div>';
   const r = src.replay;
   const total = (r && r.total_segments) || src.segment_count || 0;
@@ -190,12 +191,14 @@ function timelineHTML(src, incs) {
   }).join('');
   const marks = incs.filter(i => i.replay_pos != null).map(i =>
     `<span class="tl-mark ${esc(i.severity)}" style="left:${(i.replay_pos * 100).toFixed(2)}%" data-nav="/incident/${enc(i.id)}" title="${esc(i.title)} · ${esc(SEV_LABEL[i.severity] || '')} · ${pct(i.confidence && i.confidence.value)}"></span>`).join('');
+  const tagMarks = (tags || []).filter(t => t.frac != null).map(t =>
+    `<span class="tl-mark tag" style="left:${(t.frac * 100).toFixed(2)}%" data-action="tag-open" data-id="${esc(src.id)}" data-frac="${esc(t.frac)}" title="Your tag · ${esc(t.note)}"></span>`).join('');
   return `<div class="tl">
-      <div class="tl-labels"><div class="tl-l ruler-l">${segSec ? 'TC' : 'SEG'}</div><div class="tl-l">Footage</div><div class="tl-l">Incidents</div></div>
+      <div class="tl-labels"><div class="tl-l ruler-l">${segSec ? 'TC' : 'SEG'}</div><div class="tl-l">Footage</div><div class="tl-l">Markers</div></div>
       <div class="tl-lanes" data-scrub="${esc(src.id)}" title="Click or drag to scrub through this camera's footage">
         <div class="tl-ruler">${ticks}</div>
         <div class="tl-lane">${clips}</div>
-        <div class="tl-lane">${marks}</div>
+        <div class="tl-lane">${marks}${tagMarks}</div>
         ${pos != null ? `<div class="playhead" style="left:${(pos * 100).toFixed(2)}%" title="Replay clock"></div>` : ''}
         ${S.scrub && S.scrub.id === src.id ? `<div class="scrubhead" style="left:${(S.scrub.frac * 100).toFixed(2)}%"><span>${esc(scrubLabel(src, S.scrub.frac))}</span></div>` : ''}
       </div>
@@ -238,6 +241,7 @@ async function scrubCommit(id, frac) {
     if (S.scrub && S.scrub.frac === frac) S.scrub = { id, frac, error: e.message };
   }
   renderScrubViewer();
+  if (S.route.name === 'overview' && !DRAG) VIEWS.overview.update($('#main'));  // tag bar follows the scrub
 }
 
 function renderScrubViewer() {
@@ -381,6 +385,7 @@ VIEWS.overview = {
         <header class="pane-h"><span class="pt" id="ov-title">Feed</span><span class="pr" id="ov-actions"></span></header>
         <div class="pane-b" id="ov-player"></div>
         <div class="transport" id="ov-transport"></div>
+        <div id="ov-tagbar"></div>
       </section>
       <section class="pane">
         <header class="pane-h"><span class="pt">Incidents</span><span class="pr" id="ov-feed-meta"></span></header>
@@ -443,10 +448,17 @@ VIEWS.overview = {
     S.incidents.forEach(i => S.seen.add(i.id));
     S.feedReady = true;
     setHTML($('#ov-feed-meta', main), live ? `${mine.length}` : '');
-    setHTML($('#ov-side', main), !live ? '<div class="empty" style="padding:12px">Not monitoring this feed.</div>'
+    try { S.tags[src.id] = await GET(`api/tags?source_id=${enc(src.id)}`); } catch (_) { /* optional */ }
+    const tags = S.tags[src.id] || [];
+    setHTML($('#ov-side', main), (!live ? '<div class="empty" style="padding:12px">Not monitoring this feed.</div>'
       : mine.length ? `<div class="feed">${mine.map(i => feedItem(i, fresh.has(i.id))).join('')}</div>`
-      : '<div class="empty" style="padding:12px">No incidents yet. Sightline is watching.</div>');
-    if (!DRAG) setHTML($('#ov-timeline', main), timelineHTML(src, mine));
+      : '<div class="empty" style="padding:12px">No incidents yet. Sightline is watching.</div>')
+      + (tags.length ? `<div class="side-h">Your tags</div><div class="feed">${tags.map(tg => tagItemHTML(tg, `data-action="tag-open" data-id="${esc(src.id)}" data-frac="${esc(tg.frac ?? 0)}"`)).join('')}</div>` : ''));
+    const sc = S.scrub && S.scrub.id === src.id && S.scrub.seg ? S.scrub : null;
+    setHTML($('#ov-tagbar', main), sc
+      ? tagFormHTML({ source: src.id, segment: sc.seg.source_uri, tstart: sc.seg.t_start, tend: sc.seg.t_end, frac: sc.frac })
+      : '<div class="tag-hint">To tag a moment yourself, drag the timeline to it.</div>');
+    if (!DRAG) setHTML($('#ov-timeline', main), timelineHTML(src, mine, tags));
   },
 };
 
@@ -809,6 +821,7 @@ VIEWS.new = {
     if (!file) return;
     const lim = S.uploadMax || (S.status && S.status.limits && S.status.limits.upload_mb);
     if (lim && file.size > lim * 1024 * 1024) { toast(`File is ${(file.size / 1048576).toFixed(1)} MB; the limit is ${lim} MB`); return; }
+    if (file.size > 25 * 1048576) toast(`This file is ${(file.size / 1048576).toFixed(0)} MB. On venue Wi-Fi that can take minutes; a 720p export uploads about 10× faster.`, 'info');
     $('#nf-preview', main).innerHTML = '<div class="empty">Sampling frames…</div>';
     try {
       const kf = await extractFrames(file);
@@ -822,6 +835,7 @@ VIEWS.new = {
     $('#nf-preview', main).innerHTML = `
       <div class="player" style="margin-top:12px"><video id="nf-video" src="${esc(url)}" controls muted playsinline></video></div>
       <div id="nf-markers"></div>
+      ${f.sid ? tagFormHTML({ source: f.sid }) : ''}
       ${f.frames ? `<div class="small muted mono" style="margin-top:6px">${esc(f.file ? f.file.name : '')} · ${f.file ? (f.file.size / 1048576).toFixed(1) + ' MB · ' : ''}${fmtT(f.duration)} · ${f.frames.length} frames sampled</div>
       <div class="btn-row" style="margin-top:10px"><button class="btn primary" data-action="nf-submit" ${f.sid ? 'disabled' : ''}>${f.sid ? 'Sightline is on it' : 'Let Sightline configure it'}</button></div>` : ''}
       ${f.sid ? `<div class="btn-row" style="margin-top:10px"><button class="btn danger" data-action="remove-upload" data-sid="${esc(f.sid)}">Remove this upload</button></div>` : ''}`;
@@ -836,8 +850,10 @@ VIEWS.new = {
     fd.append('duration', String(f.duration || 0));
     if (f.width && f.height) { fd.append('width', String(f.width)); fd.append('height', String(f.height)); }
     try {
-      toast('Uploading… on slow Wi-Fi this can take a moment', 'info');
-      const r = await POST('api/newsource', fd, true);
+      const btn = $('[data-action="nf-submit"]', main);
+      const r = MOCK ? await POST('api/newsource', fd, true) : await uploadWithProgress('api/newsource', fd, p => {
+        if (btn) { btn.disabled = true; btn.textContent = p < 1 ? `Uploading ${Math.round(p * 100)}%…` : 'Uploaded · Sightline is starting'; }
+      });
       f.sid = r.source_id;
       this.showPreview(main);
       this.update(main);
@@ -863,7 +879,7 @@ VIEWS.new = {
     const dur = f.duration || up.duration || 1;
     const marks = v.markers || [];
     setHTML($('#nf-markers'), `<div class="tl" style="margin-top:8px"><div class="tl-labels"><div class="tl-l">Markers</div></div><div class="tl-lanes">
-        <div class="tl-lane">${marks.map(m => `<span class="tl-mark ${esc(m.status === 'incident' ? (m.severity || 'medium') : 'low')}" style="left:${Math.min(100, 100 * (m.t || 0) / dur).toFixed(2)}%;${m.status === 'rejected' ? 'opacity:.35;' : ''}" data-action="nf-seek" data-t="${esc(m.t_start ?? m.t)}" title="${esc(fmtT(m.t))} · ${esc(m.title)} · ${esc(m.status)}${m.confidence != null ? ' · ' + pct(m.confidence) : ''}"></span>`).join('')}</div>
+        <div class="tl-lane">${marks.map(m => `<span class="tl-mark ${esc(m.status === 'tagged' ? 'tag' : m.status === 'incident' ? (m.severity || 'medium') : 'low')}" style="left:${Math.min(100, 100 * (m.t || 0) / dur).toFixed(2)}%;${m.status === 'rejected' ? 'opacity:.35;' : ''}" data-action="nf-seek" data-t="${esc(m.t_start ?? m.t)}" title="${esc(fmtT(m.t))} · ${esc(m.title)} · ${esc(m.status)}${m.confidence != null ? ' · ' + pct(m.confidence) : ''}"></span>`).join('')}</div>
       </div></div>`);
     const cl = v.classification, pf = v.profile || {};
     const pr = pf.generated_prompt;
@@ -876,7 +892,7 @@ VIEWS.new = {
       </div>
       <div class="cols2" style="margin-top:6px">
         ${pane('Cosmos prompt Sightline wrote for this clip', pr ? `<div class="editor"><pre class="prompt-box">${esc(pr.text)}</pre><div class="editor-status"><span class="ok">${esc(pr.chars ?? (pr.text || '').length)}/800</span><span>${pr.template_fallback ? 'template fallback' : 'written by Sightline'}</span></div></div>` : '<div class="empty">Writing…</div>')}
-        ${pane('Markers on the timeline', marks.length ? `<div class="feed">${marks.map(m => `<div class="feed-item" ${m.incident_id ? `data-nav="/incident/${enc(m.incident_id)}"` : `data-action="nf-seek" data-t="${esc(m.t_start ?? m.t)}"`}>
+        ${pane('Markers on the timeline', marks.length ? `<div class="feed">${marks.map(m => m.status === 'tagged' ? tagItemHTML({ id: m.tag_id, note: m.title, t: m.t, check: m.check }, `data-action="nf-seek" data-t="${esc(m.t)}"`) : `<div class="feed-item" ${m.incident_id ? `data-nav="/incident/${enc(m.incident_id)}"` : `data-action="nf-seek" data-t="${esc(m.t_start ?? m.t)}"`}>
             <span class="sev-dot ${esc(m.status === 'incident' ? (m.severity || 'medium') : 'low')}"></span>
             <div style="min-width:0"><div class="ft">${esc(m.title)}</div><div class="fs">${esc(fmtT(m.t_start))}–${esc(fmtT(m.t_end))} · ${esc(m.status)}</div></div>
             <span class="fc">${m.confidence != null ? pct(m.confidence) : ''}</span></div>`).join('')}</div>` : '<div class="empty" style="padding:12px">No markers yet.</div>', { flush: true })}
@@ -884,6 +900,47 @@ VIEWS.new = {
       <div style="margin-top:6px">${pane('Analysis versions', evolutionHTML(v.evolution))}</div>` : '');
   },
 };
+
+function uploadWithProgress(path, fd, onProgress) {
+  return new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open('POST', new URL(path, document.baseURI));
+    x.upload.onprogress = e => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+    x.upload.onload = () => onProgress(1);
+    x.onload = () => {
+      let j = null;
+      try { j = JSON.parse(x.responseText); } catch (_) { /* not json */ }
+      if (x.status >= 200 && x.status < 300) resolve(j);
+      else reject(new Error(`${x.status} ${(j && j.detail) || x.statusText || 'upload failed'}`));
+    };
+    x.onerror = () => reject(new Error('network error (connection dropped during upload)'));
+    x.send(fd);
+  });
+}
+
+// ----- manual tags: a person marks a moment and says what happened; Sightline takes its own look
+function tagFormHTML(o) {
+  const attrs = Object.entries(o).filter(([, v]) => v != null).map(([k, v]) => `data-${k}="${esc(v)}"`).join(' ');
+  return `<form class="tagbar" data-tag-form ${attrs}>
+    <input name="note" maxlength="300" autocomplete="off" placeholder="Something happened here? Describe it, e.g. swimmer goes under and doesn't come up">
+    <button class="btn">Tag this moment</button></form>`;
+}
+function tagCheckHTML(c) {
+  c = c || {};
+  if (c.status === 'checking') return '<span class="muted">Sightline is taking a look…</span>';
+  if (c.status === 'skipped') return `<span class="muted">${esc(c.text || 'Sightline could not look at this clip')}</span>`;
+  if (!c.verdict) return '';
+  const cls = c.verdict === 'YES' ? 'ok' : c.verdict === 'NO' ? 'bad' : 'muted';
+  return `<span class="tag-verdict ${cls}">Sightline: ${esc(c.verdict === 'YES' ? 'sees it' : c.verdict === 'NO' ? "doesn't see it" : 'unclear')}</span> <span class="muted">${esc(c.text || '')}</span>`;
+}
+function tagItemHTML(tg, openAttr) {
+  const when = tg.t != null ? fmtT(tg.t) : (tg.t_start != null ? fmtTC(tg.t_start).slice(0, 8) : '');
+  return `<div class="feed-item tag-item" ${openAttr || ''}>
+    <span class="sev-dot tag"></span>
+    <div style="min-width:0"><div class="ft">${esc(tg.note)}</div><div class="fs">Tagged by you${when ? ' · ' + esc(when) : ''}</div>
+    <div class="fs">${tagCheckHTML(tg.check)}</div></div>
+    <button class="linkbtn" data-action="tag-remove" data-id="${esc(tg.id)}" title="Remove this tag">✕</button></div>`;
+}
 
 async function extractFrames(file) {
   const url = URL.createObjectURL(file);
@@ -1093,6 +1150,13 @@ const ACTIONS = {
   'nf-pick': () => $('#nf-file') && $('#nf-file').click(),
   'nf-submit': () => VIEWS.new.submit($('#main')),
   'nf-seek': el => { const v = $('#nf-video'); if (v) { v.currentTime = Number(el.dataset.t) || 0; v.play().catch(() => {}); } },
+  'tag-remove': async el => {
+    await DEL(`api/tags/${enc(el.dataset.id)}`);
+    toast('Tag removed', 'info');
+    const m = $('#main');
+    if (S.route.name === 'new') VIEWS.new.update(m); else if (S.route.name === 'overview') VIEWS.overview.update(m);
+  },
+  'tag-open': el => scrubCommit(el.dataset.id, Number(el.dataset.frac) || 0),
   'nf-open': el => { S.fresh = { sid: el.dataset.sid }; VIEWS.new.showPreview($('#main')); },
   'live-start': () => VIEWS.live.start(),
   'live-stop': () => VIEWS.live.stop(),
@@ -1108,6 +1172,24 @@ document.addEventListener('click', async e => {
   }
   const n = e.target.closest('[data-nav]');
   if (n) { e.preventDefault(); nav(n.dataset.nav); }
+});
+
+document.addEventListener('submit', async e => {
+  const f = e.target.closest('form[data-tag-form]');
+  if (!f) return;
+  e.preventDefault();
+  const note = (f.note.value || '').trim();
+  if (!note) { f.note.focus(); return; }
+  const d = f.dataset, body = { source_id: d.source, note };
+  if (d.segment) Object.assign(body, { segment: d.segment, t_start: Number(d.tstart), t_end: Number(d.tend), frac: Number(d.frac) });
+  else { const v = $('#nf-video'); body.t = v ? v.currentTime : 0; }
+  try {
+    await POST('api/tags', body);
+    f.note.value = '';
+    toast('Tagged. Sightline is taking its own look.', 'info');
+    const m = $('#main');
+    if (S.route.name === 'new') VIEWS.new.update(m); else if (S.route.name === 'overview') VIEWS.overview.update(m);
+  } catch (err) { toast('Tag failed: ' + err.message); }
 });
 
 // A clip that fails to load falls back to a placeholder instead of a black box.

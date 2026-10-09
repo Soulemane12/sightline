@@ -478,6 +478,12 @@ class NewSourceService:
                 "confidence": ((inc.get("confidence") or {}).get("value") if inc else (e.get("llm") or {}).get("confidence")),
                 "incident_id": inc.get("id") if inc else None,
             })
+        for tg in self.store.list_kind("tag", source_id=sid):
+            if tg:
+                t = float(tg.get("t") or 0.0)
+                markers.append({"tag_id": tg.get("id"), "status": "tagged", "t_start": t, "t_end": t, "t": t,
+                                "title": tg.get("note"), "check": tg.get("check") or {}, "severity": None,
+                                "confidence": None, "incident_id": None})
         markers.sort(key=lambda m: m["t"] or 0)
         prof = self.store.get_profile(sid) or {}
         return {

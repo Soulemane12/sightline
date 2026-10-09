@@ -31,6 +31,7 @@ KINDS = (
     "reingest_job",
     "evolution",
     "meta",
+    "tag",
 )
 
 

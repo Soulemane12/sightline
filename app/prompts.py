@@ -325,6 +325,25 @@ INVESTIGATE = {"system": INVESTIGATE_SYSTEM, "user": INVESTIGATE_USER}
 PATTERNS = {"system": PATTERNS_SYSTEM, "user": PATTERNS_USER}
 
 
+def objective_prompt(domain: str, objectives: list[tuple[str, str]], max_chars: int = 800) -> str:
+    """Fallback Cosmos prompt assembled from the plan's own objectives (name, id).
+
+    Used when the LLM-written prompt is unavailable, so the re-analysis still looks for what this
+    camera's plan cares about instead of a generic domain template.
+    """
+    head = (f"Safety review ({domain}). SCENE: setting and layout. PEOPLE: where each person is, what they "
+            "are doing, and anything near them. ")
+    tail = " TIMELINE: describe before, during and after in order, with positions and motion. Say only what is visible."
+    names, ids = [n for n, _ in objectives], [i for _, i in objectives]
+    while True:
+        watch = ("WATCH FOR: " + "; ".join(names) + ".") if names else ""
+        flags = " FLAGS: list any of " + (", ".join(ids) or "hazard") + ", or none."
+        text = head + watch + tail + flags
+        if len(text) <= max_chars or not names:
+            return text[:max_chars]
+        names, ids = names[:-1], ids[:-1]
+
+
 def fill(template: str, **vars: str) -> str:
     """Replace <<key>> placeholders. Unknown keys left unchanged."""
     out = template

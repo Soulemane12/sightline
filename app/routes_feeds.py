@@ -17,7 +17,7 @@ from store import get_store
 router = APIRouter()
 
 _PER_SOURCE = ("classification", "profile", "pipeline", "evolution")
-_BY_SOURCE = ("event", "incident", "reingest_job")
+_BY_SOURCE = ("event", "incident", "reingest_job", "tag")
 
 
 def clear_feed(source_id: str) -> dict[str, int]:

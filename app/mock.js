@@ -386,11 +386,22 @@
   const LIVE_SCENES = ['A person sits at a desk facing the camera.', 'The person stands up and walks toward the door.', 'A backpack is placed on the chair.', 'The room is empty; the backpack remains on the chair.', 'The person returns and picks up the backpack.'];
 
   // ---------- router
+  const TAGS = [];
   function route(method, path, body) {
     const [p, qs] = path.split('?');
     const q = new URLSearchParams(qs || '');
     const parts = p.split('/').filter(Boolean); // ['api', ...]
     const r = parts.slice(1);
+    if (r[0] === 'tags') {
+      if (method === 'POST') {
+        const tg = { id: 'tag-' + (++jobSeq), ...body, created_at: new Date().toISOString(), check: { status: 'checking' } };
+        TAGS.push(tg);
+        setTimeout(() => { tg.check = { status: 'done', verdict: 'YES', text: 'A swimmer slips under the surface near the lane rope and does not resurface for several seconds.' }; }, 2500);
+        return tg;
+      }
+      if (method === 'DELETE') { const i = TAGS.findIndex(t => t.id === r[1]); if (i >= 0) TAGS.splice(i, 1); return { ok: true }; }
+      return TAGS.filter(t => !q.get('source_id') || t.source_id === q.get('source_id'));
+    }
     if (r[0] === 'status') {
       const vis = visibleIncidents();
       return { vss: { ok: true }, gpu: { cosmos: { ok: true }, yolo: { ok: true }, embed: { ok: true }, canary: { ok: true } },
@@ -503,7 +514,7 @@
           dropped: [{ id: 'forklift', name: 'Forklift proximity', reason: 'No forklifts or racks in any frame.' }],
           generated_prompt: { text: 'Driveway safety analysis. SCENE: ... FLAGS: pedestrian_vehicle_proximity or none.', chars: 612 } } : {},
         evolution: e > 10500 ? { steps: [{ stage: 'generic', text: 'A car is parked in a driveway; a person walks nearby.', label: 'Generic Cosmos description' }, { stage: 'objective', text: 'Pedestrian / vehicle conflict (high)' }, { stage: 'prompt', text: 'Driveway safety analysis. SCENE: …' }, { stage: 'reanalyzed', kind: 'preview', label: "Re-analysis with Sightline's prompt (direct Cosmos, not indexed)", text: 'The car reverses while the person walks behind it, about 1 m away. FLAGS: pedestrian_vehicle_proximity' }] } : { steps: [] },
-        markers: done ? [{ t: 9, t_start: 8, t_end: 10, status: 'rejected', title: 'pedestrian vehicle conflict' }, { t: 23, t_start: 22, t_end: 24, status: 'incident', severity: 'high', title: 'Person behind a reversing car', confidence: 0.84, incident_id: 'inc-pie-077' }, { t: 31, t_start: 30, t_end: 32, status: 'candidate', title: 'unattended object' }] : [],
+        markers: done ? [{ t: 9, t_start: 8, t_end: 10, status: 'rejected', title: 'pedestrian vehicle conflict' }, { t: 23, t_start: 22, t_end: 24, status: 'incident', severity: 'high', title: 'Person behind a reversing car', confidence: 0.84, incident_id: 'inc-pie-077' }, { t: 31, t_start: 30, t_end: 32, status: 'candidate', title: 'unattended object' }].concat(TAGS.filter(t => t.source_id === r[1]).map(t => ({ tag_id: t.id, status: 'tagged', t: t.t, t_start: t.t, t_end: t.t, title: t.note, check: t.check }))).sort((a, b) => a.t - b.t) : [],
         incidents: [] };
     }
     if (r[0] === 'live') {

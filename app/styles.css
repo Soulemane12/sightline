@@ -329,3 +329,15 @@ input[type=text]:focus, select:focus { outline: none; border-color: var(--accent
 
 .linkbtn { background: none; border: 0; color: var(--text-3); font: 500 11.5px var(--sans); cursor: pointer; padding: 0; }
 .linkbtn:hover { color: var(--crit); }
+
+/* manual tags: a person's own marker; Sightline's look is shown next to it */
+.tagbar { display: flex; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--line); background: var(--pane-h); }
+.stack .tagbar, #nf-preview .tagbar { margin-top: 8px; border: 1px solid var(--line); border-radius: 3px; }
+.tagbar input { flex: 1; min-width: 0; background: var(--bg, #111); color: var(--text); border: 1px solid var(--line); border-radius: 3px; padding: 6px 8px; font: 13px var(--sans); }
+.tagbar input:focus { outline: none; border-color: var(--accent); }
+.tag-hint { padding: 7px 12px; border-top: 1px solid var(--line); background: var(--pane-h); font-size: 12px; color: var(--text-3); }
+.tl-mark.tag { background: var(--accent); border-radius: 50%; width: 12px; height: 12px; top: 50%; bottom: auto; margin-top: -6px; }
+.feed-item .sev-dot.tag { background: var(--accent); border-radius: 50%; }
+.tag-verdict { font-weight: 600; }
+.tag-verdict.ok { color: var(--ok); }
+.tag-verdict.bad { color: var(--high); }
