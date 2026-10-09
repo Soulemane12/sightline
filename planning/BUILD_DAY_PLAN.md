@@ -46,6 +46,18 @@ You are the tech lead. You make decisions, approve re-ingests, review diffs, wat
 
 ---
 
+## 1b. TEAM OF 3 (updated 10-09 09:45; this overrides "solo" anywhere else)
+
+| Station | Who | Owns | Notes |
+|---|---|---|---|
+| **VM-1** (lead) | you | Seats: **QA** (deploys, tags), **Backend-Data**, **Backend-Intel** | **Only VM-1 runs re-ingests** (shared team index, so two people re-ingesting overwrite each other) |
+| **VM-2** | teammate A | Seats: **Architect** (P3, then P15 README), **Backend-Intel-2** (second environment, P11/P12 flagged lanes) | Same team number as VM-1. Never deploys; QA on VM-1 deploys. |
+| **Laptop** | teammate B + Claude Code on the lead's laptop | **Frontend** (`app/index.html, app.js, styles.css, mock.js`), built against `?mock=1` (no credentials needed); demo video; tokens& submission form; pitch | Cannot reach VAST APIs; works only against our internal API contract (ARCHITECTURE §5) and mock data |
+
+**Git with 3 writers:** everyone works on `main` with disjoint files. **`git pull --rebase` before every commit, push right after.** Never `git add -A`. Only QA (VM-1) tags `good-*` and deploys. The laptop pushes frontend changes; QA pulls before each deploy.
+
+**Submission:** all 3 names and emails. The teammate on the laptop owns the form and the video upload; the lead owns the final "submit" click by 4:15.
+
 ## 2. Timeline and gates
 
 | Time | Lead (you) | Seat A | Seat B | Seat C |
