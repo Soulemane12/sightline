@@ -226,7 +226,7 @@ function renderTop() {
   setHTML($('#health'), html);
   const page = { overview: 'monitor', source: 'monitor', incident: 'monitor', search: 'search', new: 'new', live: 'live' }[S.route.name];
   const flags = st.flags || {};
-  const shown = { new: MOCK || !!flags.upload, live: MOCK || !!flags.live };
+  const shown = { new: MOCK || !!flags.upload || !!S.uploadEnabled, live: MOCK || !!flags.live };
   document.querySelectorAll('#pages button').forEach(b => {
     b.classList.toggle('active', b.dataset.page === page);
     if (b.dataset.page in shown) b.hidden = !shown[b.dataset.page];  // hide features disabled on this deployment
@@ -592,71 +592,106 @@ VIEWS.search = {
   },
 };
 
-// ----- import: Sightline configures itself on footage it has never seen
+// ----- import: upload any clip; Sightline configures itself on it and puts markers on its timeline
 VIEWS.new = {
   mount(main) {
-    const flags = (S.status && S.status.flags) || {};
-    if (!flags.upload && !MOCK) { main.innerHTML = pane('Import', '<div class="empty">Disabled on this deployment (UPLOAD_ENABLED is off).</div>'); return; }
-    const lim = S.status && S.status.limits && S.status.limits.upload_mb;
+    if (!S.uploadEnabled && !MOCK) { main.innerHTML = pane('Import', '<div class="empty">Disabled on this deployment.</div>'); return; }
     S.fresh = S.fresh || {};
-    main.innerHTML = `<div class="cols2" style="align-items:start">
-      ${pane('Import footage', `
-        <input type="file" id="nf-file" accept="video/*" hidden>
-        <div class="drop" data-action="nf-pick">Choose a video file${lim ? ` (max ${esc(lim)} MB)` : ''}<div class="small">Self-recorded footage only. H.264 MP4 works best.</div></div>
-        <div class="small muted" style="margin-top:10px">Sightline looks at the clip first and writes its own Cosmos ingestion prompt before the footage enters the VAST index.</div>
-        <div id="nf-preview"></div>`)}
-      ${pane('Agent pipeline', '<div class="empty" style="padding:12px">Waiting for a clip.</div>', { id: 'nf-pipeline', flush: true })}
+    main.innerHTML = `<div class="stack">
+      <div class="cols-3-2">
+        ${pane('Import any footage', `
+          <input type="file" id="nf-file" accept="video/*" hidden>
+          <div class="drop" data-action="nf-pick">Choose a video file${S.uploadMax ? ` (max ${esc(S.uploadMax)} MB)` : ''}<div class="small">Self-recorded or licensed footage. H.264 MP4 works best; short clips (10–90 s) analyze fastest.</div></div>
+          <div class="small muted" style="margin-top:8px">You don't tell Sightline what to look for. It samples the clip, works out what kind of place it is, decides what matters there, writes its own Cosmos prompt, re-analyzes the clip with it, and marks the moments that matter.</div>
+          <div id="nf-preview"></div>`, { id: 'nf-left' })}
+        ${pane('Agent pipeline', '<div class="empty" style="padding:12px">Waiting for a clip.</div>', { id: 'nf-pipeline', flush: true })}
+      </div>
+      <div id="nf-results"></div>
+      ${pane('Recent uploads', '<div class="empty" style="padding:12px">None yet.</div>', { id: 'nf-recent', flush: true })}
     </div>`;
     $('#nf-file', main).addEventListener('change', e => this.pick(main, e.target.files[0]));
-    if (S.fresh.frames) this.showPreview(main);
+    if (S.fresh.frames || S.fresh.sid) this.showPreview(main);
   },
   async pick(main, file) {
     if (!file) return;
-    const lim = S.status && S.status.limits && S.status.limits.upload_mb;
+    const lim = S.uploadMax || (S.status && S.status.limits && S.status.limits.upload_mb);
     if (lim && file.size > lim * 1024 * 1024) { toast(`File is ${(file.size / 1048576).toFixed(1)} MB; the limit is ${lim} MB`); return; }
-    $('#nf-preview', main).innerHTML = '<div class="empty">Extracting keyframes…</div>';
+    $('#nf-preview', main).innerHTML = '<div class="empty">Sampling frames…</div>';
     try {
-      const kf = await extractKeyframes(file, 4);
-      S.fresh = { file, frames: kf.frames, duration: kf.duration, url: kf.url };
+      const kf = await extractFrames(file);
+      S.fresh = { file, frames: kf.frames, duration: kf.duration, width: kf.width, height: kf.height, url: kf.url };
       this.showPreview(main);
     } catch (e) { $('#nf-preview', main).innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
   },
   showPreview(main) {
     const f = S.fresh;
+    const url = f.url || (f.sid ? new URL(`api/newsource/${enc(f.sid)}/video`, document.baseURI).href : '');
     $('#nf-preview', main).innerHTML = `
-      <div class="player" style="margin-top:12px"><video src="${esc(f.url)}" controls muted playsinline></video></div>
-      <div class="keyframes">${f.frames.map(k => `<img src="${k.url}" alt="keyframe at ${fmtT(k.t)}" title="keyframe at ${fmtT(k.t)}">`).join('')}</div>
-      <div class="small muted mono">${esc(f.file.name)} · ${(f.file.size / 1048576).toFixed(1)} MB · ${fmtT(f.duration)}</div>
-      <div class="btn-row" style="margin-top:10px"><button class="btn primary" data-action="nf-submit" ${f.job ? 'disabled' : ''}>Let Sightline configure it</button></div>`;
+      <div class="player" style="margin-top:12px"><video id="nf-video" src="${esc(url)}" controls muted playsinline></video></div>
+      <div id="nf-markers"></div>
+      ${f.frames ? `<div class="small muted mono" style="margin-top:6px">${esc(f.file ? f.file.name : '')} · ${f.file ? (f.file.size / 1048576).toFixed(1) + ' MB · ' : ''}${fmtT(f.duration)} · ${f.frames.length} frames sampled</div>
+      <div class="btn-row" style="margin-top:10px"><button class="btn primary" data-action="nf-submit" ${f.sid ? 'disabled' : ''}>${f.sid ? 'Sightline is on it' : 'Let Sightline configure it'}</button></div>` : ''}`;
   },
   async submit(main) {
     const f = S.fresh;
-    if (!f || !f.file || f.job) return;
+    if (!f || !f.file || f.sid) return;
     const fd = new FormData();
     fd.append('file', f.file, f.file.name);
     f.frames.forEach((k, i) => fd.append(`keyframe_${i}`, k.blob, `keyframe_${i}.jpg`));
     fd.append('keyframe_times', JSON.stringify(f.frames.map(k => k.t)));
+    fd.append('duration', String(f.duration || 0));
+    if (f.width && f.height) { fd.append('width', String(f.width)); fd.append('height', String(f.height)); }
     try {
+      toast('Uploading… on slow Wi-Fi this can take a moment', 'info');
       const r = await POST('api/newsource', fd, true);
-      f.job = r.job_id; f.source_id = r.source_id;
+      f.sid = r.source_id;
       this.showPreview(main);
       this.update(main);
     } catch (e) { toast('Upload failed: ' + e.message); }
   },
   async update(main) {
-    const f = S.fresh;
-    if (!f || !f.job || !$('#nf-pipeline', main)) return;
+    if (!$('#nf-recent', main)) return;
     try {
-      const [job, run] = await Promise.all([GET(`api/jobs/${enc(f.job)}`), f.source_id ? GET(`api/pipeline/${enc(f.source_id)}`) : null]);
-      const done = job.status === 'done' || job.status === 'completed';
-      setHTML($('#nf-pipeline', main), pipelineHTML(run) +
-        (job.status === 'failed' ? `<div class="callout warn" style="margin:10px">Failed: ${esc(job.error || '')}</div>` : '') +
-        (done && f.source_id ? `<div class="btn-row" style="padding:10px"><button class="btn primary" data-nav="/source/${enc(f.source_id)}">Open the new camera</button></div>` : ''));
-    } catch (e) { setHTML($('#nf-pipeline', main), `<div class="empty" style="padding:12px">${esc(e.message)}</div>`); }
+      const recent = await GET('api/newsource');
+      setHTML($('#nf-recent', main), recent.length ? `<div class="feed">${recent.map(r => `<div class="feed-item" data-action="nf-open" data-sid="${esc(r.source_id)}">
+        <span class="sev-dot"></span><div style="min-width:0"><div class="ft">${esc((r.upload && r.upload.filename) || r.label)}</div>
+        <div class="fs">${esc(r.status)} · ${esc((r.upload && r.upload.incidents) ?? 0)} incidents · ${esc(clock(r.upload && r.upload.created_at))}</div></div><span class="fc"></span></div>`).join('')}</div>`
+        : '<div class="empty" style="padding:12px">None yet.</div>');
+    } catch (_) { /* optional */ }
+    const f = S.fresh;
+    if (!f || !f.sid) return;
+    let v;
+    try { v = await GET(`api/newsource/${enc(f.sid)}`); } catch (e) { setHTML($('#nf-pipeline', main), `<div class="empty" style="padding:12px">${esc(e.message)}</div>`); return; }
+    const up = v.upload || {};
+    setHTML($('#nf-pipeline', main), pipelineHTML(v.pipeline) +
+      (up.status === 'failed' ? `<div class="callout warn" style="margin:10px">Failed: ${esc(up.error || '')}</div>` : '') +
+      (up.status === 'done' ? `<div class="small muted" style="padding:10px">Done in ${esc(up.elapsed_s)} s · ${esc(up.incidents)} incident(s)</div>` : ''));
+    const dur = f.duration || up.duration || 1;
+    const marks = v.markers || [];
+    setHTML($('#nf-markers'), `<div class="tl" style="margin-top:8px"><div class="tl-labels"><div class="tl-l">Markers</div></div><div class="tl-lanes">
+        <div class="tl-lane">${marks.map(m => `<span class="tl-mark ${esc(m.status === 'incident' ? (m.severity || 'medium') : 'low')}" style="left:${Math.min(100, 100 * (m.t || 0) / dur).toFixed(2)}%;${m.status === 'rejected' ? 'opacity:.35;' : ''}" data-action="nf-seek" data-t="${esc(m.t_start ?? m.t)}" title="${esc(fmtT(m.t))} · ${esc(m.title)} · ${esc(m.status)}${m.confidence != null ? ' · ' + pct(m.confidence) : ''}"></span>`).join('')}</div>
+      </div></div>`);
+    const cl = v.classification, pf = v.profile || {};
+    const pr = pf.generated_prompt;
+    setHTML($('#nf-results'), cl ? `<div class="cols2">
+        ${pane('What Sightline decided this is', `<div style="margin-bottom:8px"><span class="tag accent">${esc(cap(cl.domain))} ${pct(cl.confidence)}</span> ${cl.camera_type ? `<span class="tag">${esc(cl.camera_type)} camera</span>` : ''}</div>
+          <div style="margin-bottom:8px">${esc(cl.description || '')}</div>
+          <ul class="evidence-list">${(cl.evidence || []).map(e => `<li><span class="tag">${esc(e.source)}</span><span>${esc(e.signal)}</span></li>`).join('')}</ul>`)}
+        ${pane('What it will watch for', `${(pf.objectives || []).map(o => `<div class="qa">${sevPill(o.severity)} <span style="margin-left:6px">${esc(o.name)}</span><div class="a small">${esc(o.description || '')}</div></div>`).join('') || '<div class="empty">Planning…</div>'}
+          ${(pf.dropped || []).map(x => `<div class="qa"><span class="sev low"><i></i>N/A</span> <span class="muted" style="margin-left:6px">${esc(x.name || x.id)}</span><div class="a small">${esc(x.reason)}</div></div>`).join('')}`)}
+      </div>
+      <div class="cols2" style="margin-top:6px">
+        ${pane('Cosmos prompt Sightline wrote for this clip', pr ? `<div class="editor"><pre class="prompt-box">${esc(pr.text)}</pre><div class="editor-status"><span class="ok">${esc(pr.chars ?? (pr.text || '').length)}/800</span><span>${pr.template_fallback ? 'template fallback' : 'written by Sightline'}</span></div></div>` : '<div class="empty">Writing…</div>')}
+        ${pane('Markers on the timeline', marks.length ? `<div class="feed">${marks.map(m => `<div class="feed-item" ${m.incident_id ? `data-nav="/incident/${enc(m.incident_id)}"` : `data-action="nf-seek" data-t="${esc(m.t_start ?? m.t)}"`}>
+            <span class="sev-dot ${esc(m.status === 'incident' ? (m.severity || 'medium') : 'low')}"></span>
+            <div style="min-width:0"><div class="ft">${esc(m.title)}</div><div class="fs">${esc(fmtT(m.t_start))}–${esc(fmtT(m.t_end))} · ${esc(m.status)}</div></div>
+            <span class="fc">${m.confidence != null ? pct(m.confidence) : ''}</span></div>`).join('')}</div>` : '<div class="empty" style="padding:12px">No markers yet.</div>', { flush: true })}
+      </div>
+      <div style="margin-top:6px">${pane('Analysis versions', evolutionHTML(v.evolution))}</div>` : '');
   },
 };
 
-async function extractKeyframes(file, n) {
+async function extractFrames(file) {
   const url = URL.createObjectURL(file);
   const v = document.createElement('video');
   v.src = url; v.muted = true; v.playsInline = true; v.preload = 'auto';
@@ -664,18 +699,20 @@ async function extractKeyframes(file, n) {
     v.onloadeddata = res;
     v.onerror = () => rej(new Error('This browser cannot decode the clip. Try an H.264 MP4.'));
   });
+  const dur = v.duration || 1;
+  const step = Math.min(6, Math.max(1.5, dur / 24));
+  const n = Math.max(4, Math.min(40, Math.ceil(dur / step)));
   const c = document.createElement('canvas');
-  c.width = 640; c.height = Math.round(640 * (v.videoHeight || 360) / (v.videoWidth || 640));
+  c.width = 512; c.height = Math.round(512 * (v.videoHeight || 288) / (v.videoWidth || 512));
   const ctx = c.getContext('2d');
   const frames = [];
   for (let i = 0; i < n; i++) {
-    const t = (v.duration || 1) * (0.1 + 0.8 * i / Math.max(1, n - 1));
+    const t = Math.min(dur - 0.05, (i + 0.5) * dur / n);
     await new Promise(res => { v.onseeked = res; v.currentTime = t; setTimeout(res, 1500); });
     ctx.drawImage(v, 0, 0, c.width, c.height);
-    const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.82));
-    frames.push({ t, blob, url: c.toDataURL('image/jpeg', 0.6) });
+    frames.push({ t: Math.round(t * 100) / 100, blob: await new Promise(r => c.toBlob(r, 'image/jpeg', 0.8)) });
   }
-  return { frames, duration: v.duration, url };
+  return { frames, duration: dur, width: v.videoWidth, height: v.videoHeight, url };
 }
 
 // ----- live camera: motion gate in the browser, Cosmos only on change or checkpoint
@@ -824,6 +861,8 @@ const ACTIONS = {
   },
   'nf-pick': () => $('#nf-file') && $('#nf-file').click(),
   'nf-submit': () => VIEWS.new.submit($('#main')),
+  'nf-seek': el => { const v = $('#nf-video'); if (v) { v.currentTime = Number(el.dataset.t) || 0; v.play().catch(() => {}); } },
+  'nf-open': el => { S.fresh = { sid: el.dataset.sid }; VIEWS.new.showPreview($('#main')); },
   'live-start': () => VIEWS.live.start(),
   'live-stop': () => VIEWS.live.stop(),
 };
@@ -886,6 +925,7 @@ function loadScript(src) {
 
 async function boot() {
   if (MOCK) await loadScript('mock.js');
+  try { const u = await GET('api/newsource/enabled'); S.uploadEnabled = !!u.enabled; S.uploadMax = u.max_mb; } catch (_) { S.uploadEnabled = false; }
   await refreshStatus();
   window.addEventListener('hashchange', render);
   await render();

@@ -243,6 +243,7 @@
   const extraIncidents = [];
   const genericJobs = {};        // api/jobs
   const live = {};
+  const uploads = {};
   let jobSeq = 1;
 
   // a completed R1 re-ingest on the warehouse source
@@ -464,13 +465,34 @@
       if (!j) return { id: r[1], status: 'done' };
       return newsourceJob(j);
     }
-    if (r[0] === 'newsource' && method === 'POST') {
-      const n = SOURCES.filter(s => s.id.startsWith('sightline-new')).length + 1;
-      const id = `sightline-new-${n}`;
-      SOURCES.push({ id, camera_id: id, label: `New footage ${n}`, location: 'uploaded', capture_type: 'self-recorded', segment_count: 6, status: 'configuring', total: 6 });
-      const job = { id: 'ns-' + (++jobSeq), source_id: id, started: Date.now() };
-      genericJobs[job.id] = job;
-      return { job_id: job.id, source_id: id };
+    if (r[0] === 'newsource') {
+      if (r[1] === 'enabled') return { enabled: true, max_mb: 100 };
+      if (method === 'POST') {
+        const sid = 'upload-' + (++jobSeq);
+        uploads[sid] = { t0: Date.now(), filename: 'staged_clip.mp4' };
+        return { source_id: sid, job_id: sid };
+      }
+      if (!r[1]) return Object.entries(uploads).map(([sid, u]) => ({ source_id: sid, label: 'Uploaded: ' + u.filename, status: since(u.t0) > 12000 ? 'configured' : 'configuring', upload: { filename: u.filename, created_at: iso(u.t0), incidents: since(u.t0) > 12000 ? 1 : 0 } }));
+      const u = uploads[decodeURIComponent(r[1])];
+      if (!u) throw new Error('404 upload not found');
+      const e = since(u.t0);
+      const st = (a, b) => e < a ? 'pending' : e < b ? 'running' : 'done';
+      const done = e > 12000;
+      return { source_id: r[1], status: done ? 'configured' : 'configuring', upload: { filename: u.filename, duration: 40, status: done ? 'done' : 'running', elapsed_s: 12.4, incidents: done ? 1 : 0 },
+        pipeline: { steps: [
+          { key: 'look', label: 'Scene look: Cosmos describes 20 frames', status: st(0, 3000), summary: e > 3000 ? '20/20 frames in 2.9 s · YOLO on the clip' : '' },
+          { key: 'classify', status: st(3000, 5000), summary: e > 5000 ? 'traffic · 88% · llm' : '' },
+          { key: 'plan', status: st(5000, 7000), summary: e > 7000 ? '4 objectives' : '' },
+          { key: 'prompt', status: st(7000, 8000), summary: e > 8000 ? '612/800 chars' : '' },
+          { key: 'reanalyze', label: "Re-analysis with Sightline's prompt (direct Cosmos, not indexed)", status: st(8000, 10500), summary: e > 10500 ? '20/20 frames in 2.6 s' : '' },
+          { key: 'incident', status: st(10500, 12000), summary: done ? '1 incident' : '' }] },
+        classification: e > 5000 ? { domain: 'traffic', confidence: 0.88, camera_type: 'fixed', description: 'Residential driveway with a slowly moving car and a pedestrian.', evidence: [{ source: 'visual', signal: 'Driveway, garage and a car in 18 of 20 frames' }] } : null,
+        profile: e > 7000 ? { objectives: [{ name: 'Pedestrian / vehicle conflict', severity: 'high', description: 'A person close to a moving car.' }, { name: 'Unattended object', severity: 'medium', description: 'Bag left in the driveway.' }],
+          dropped: [{ id: 'forklift', name: 'Forklift proximity', reason: 'No forklifts or racks in any frame.' }],
+          generated_prompt: { text: 'Driveway safety analysis. SCENE: ... FLAGS: pedestrian_vehicle_proximity or none.', chars: 612 } } : {},
+        evolution: e > 10500 ? { steps: [{ stage: 'generic', text: 'A car is parked in a driveway; a person walks nearby.', label: 'Generic Cosmos description' }, { stage: 'objective', text: 'Pedestrian / vehicle conflict (high)' }, { stage: 'prompt', text: 'Driveway safety analysis. SCENE: …' }, { stage: 'reanalyzed', kind: 'preview', label: "Re-analysis with Sightline's prompt (direct Cosmos, not indexed)", text: 'The car reverses while the person walks behind it, about 1 m away. FLAGS: pedestrian_vehicle_proximity' }] } : { steps: [] },
+        markers: done ? [{ t: 9, t_start: 8, t_end: 10, status: 'rejected', title: 'pedestrian vehicle conflict' }, { t: 23, t_start: 22, t_end: 24, status: 'incident', severity: 'high', title: 'Person behind a reversing car', confidence: 0.84, incident_id: 'inc-pie-077' }, { t: 31, t_start: 30, t_end: 32, status: 'candidate', title: 'unattended object' }] : [],
+        incidents: [] };
     }
     if (r[0] === 'live') {
       if (r[1] === 'session') { const sid = 'live-' + (++jobSeq); live[sid] = { frames: 0, observations: [], events: [], t0: Date.now() }; return { sid }; }
