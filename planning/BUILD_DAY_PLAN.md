@@ -46,7 +46,9 @@ You are the tech lead. You make decisions, approve re-ingests, review diffs, wat
 
 ---
 
-## 1b. TEAM OF 3 (updated 10-09 09:45; this overrides "solo" anywhere else)
+## 1b. TEAM OF 3 (updated 10-09; this overrides "solo" anywhere else)
+
+**Team 22.** Lab VM: 4 vCPU, ~9.7 GB RAM, 64 GB disk. `/config/team-22.config`, `/config/team-22-k8s.yaml`. `gh` is not installed on the VM, so clone and push with a fine-grained PAT (credential cache in memory, never in the URL or a file). **VM-1 is operated by the teammate with the most reliable Wi-Fi.** The VM keeps running (and agents keep working) when a browser tab drops; reopen via the workshop page → Open desktop, never refresh. Start with **2** concurrent agents and check `free -h` before adding a third.
 
 | Station | Who | Owns | Notes |
 |---|---|---|---|
